@@ -105,6 +105,46 @@ function formatJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+function shouldSetClaudeCommitAttributionPreference(plan) {
+  if (!plan?.adapter || !['claude', 'claude-project'].includes(plan.adapter.target)) {
+    return false;
+  }
+
+  return plan.operations.some(operation => {
+    if (typeof operation?.destinationPath !== 'string') {
+      return false;
+    }
+    const relativePath = path.relative(plan.targetRoot, operation.destinationPath);
+    return relativePath && !relativePath.startsWith(`docs${path.sep}`) && relativePath !== 'docs';
+  });
+}
+
+function writeClaudeCommitAttributionPreference(settingsPath) {
+  let settings = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = readJsonObject(settingsPath, 'Claude settings');
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  if (settings.includeCoAuthoredBy === true) {
+    return false;
+  }
+
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(
+    settingsPath,
+    formatJson({
+      ...settings,
+      includeCoAuthoredBy: false,
+    }),
+    'utf8'
+  );
+  return true;
+}
+
 function replacePluginRootPlaceholders(value, pluginRoot) {
   if (!pluginRoot) {
     return value;
@@ -325,6 +365,11 @@ function applyInstallPlan(plan, dependencies = {}) {
   if (hasLegacyMigration) {
     removeLegacyClaudeSkillFiles(migration, plan.targetRoot);
   }
+
+  if (shouldSetClaudeCommitAttributionPreference(appliedPlan)) {
+    writeClaudeCommitAttributionPreference(path.join(plan.targetRoot, 'settings.json'));
+  }
+
   const finalState = stateWithContentDigests(migration.finalState);
   if (typeof beforeInstallStateWrite === 'function') {
     beforeInstallStateWrite({ plan: appliedPlan, state: finalState });

@@ -18,6 +18,7 @@ const OFFICIAL_MARKETPLACE_NAME = 'ecc';
 const OFFICIAL_MARKETPLACE_REPO = 'affaan-m/ecc';
 const OFFICIAL_MARKETPLACE_URL = 'https://github.com/affaan-m/ECC';
 const PROVIDER_COMMAND_TIMEOUT_MS = 120 * 1000;
+const CLAUDE_COAUTHOR_SETTING_KEY = 'includeCoAuthoredBy';
 const VALID_SCOPES = new Set(['user', 'project', 'local']);
 const VALID_HOOK_MODES = new Set(['off', 'minimal', 'standard', 'strict']);
 
@@ -320,21 +321,39 @@ function deriveHookMode(settings) {
   return options.hooks_enabled ? options.hook_profile : 'off';
 }
 
+function withClaudeCommitAttributionPreference(settings) {
+  if (settings?.[CLAUDE_COAUTHOR_SETTING_KEY] === true) {
+    return settings;
+  }
+  return {
+    ...settings,
+    [CLAUDE_COAUTHOR_SETTING_KEY]: false,
+  };
+}
+
+function needsClaudeCommitAttributionPreferenceWrite(settings) {
+  return settings?.[CLAUDE_COAUTHOR_SETTING_KEY] !== false
+    && settings?.[CLAUDE_COAUTHOR_SETTING_KEY] !== true;
+}
+
 function writeClaudePluginOptions(settingsPath, hooks) {
   const settings = readSettings(settingsPath);
   const pluginConfigs = settings.pluginConfigs || {};
   const eccConfig = pluginConfigs[CURRENT_PLUGIN_ID] || {};
   const options = eccConfig.options || {};
+  const nextOptions = hooks === undefined
+    ? { ...options }
+    : {
+      ...options,
+      ...hookOptions(hooks),
+    };
   const nextSettings = {
-    ...settings,
+    ...withClaudeCommitAttributionPreference(settings),
     pluginConfigs: {
       ...pluginConfigs,
       [CURRENT_PLUGIN_ID]: {
         ...eccConfig,
-        options: {
-          ...options,
-          ...hookOptions(hooks),
-        },
+        options: nextOptions,
       },
     },
   };
@@ -609,8 +628,15 @@ function setupClaudePlugin(options = {}, dependencies = {}) {
     run,
     scope: inventory.scope,
   });
-  if (options.hooks !== undefined || !inventory.installed) {
-    writeClaudePluginOptions(settingsPath, hooks);
+  const hooksToPersist = options.hooks !== undefined || !inventory.installed
+    ? hooks
+    : undefined;
+  if (
+    options.hooks !== undefined
+    || !inventory.installed
+    || needsClaudeCommitAttributionPreferenceWrite(initialSettings)
+  ) {
+    writeClaudePluginOptions(settingsPath, hooksToPersist);
   }
 
   return {
@@ -648,5 +674,7 @@ module.exports = {
   runClaude,
   setupClaudePlugin,
   verifyPluginAtScope,
+  needsClaudeCommitAttributionPreferenceWrite,
+  withClaudeCommitAttributionPreference,
   writeClaudePluginOptions,
 };
