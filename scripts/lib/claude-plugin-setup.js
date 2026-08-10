@@ -5,6 +5,10 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const { writeFileAtomic } = require('./atomic-write');
+const {
+  hasExplicitCommitAttributionPreference,
+  withCommitAttributionDisabled,
+} = require('./claude-commit-attribution');
 const { normalizeGitHubGitOrigin } = require('./github-origin');
 const {
   CURRENT_PLUGIN_ID,
@@ -18,7 +22,6 @@ const OFFICIAL_MARKETPLACE_NAME = 'ecc';
 const OFFICIAL_MARKETPLACE_REPO = 'affaan-m/ecc';
 const OFFICIAL_MARKETPLACE_URL = 'https://github.com/affaan-m/ECC';
 const PROVIDER_COMMAND_TIMEOUT_MS = 120 * 1000;
-const CLAUDE_COAUTHOR_SETTING_KEY = 'includeCoAuthoredBy';
 const VALID_SCOPES = new Set(['user', 'project', 'local']);
 const VALID_HOOK_MODES = new Set(['off', 'minimal', 'standard', 'strict']);
 
@@ -322,18 +325,11 @@ function deriveHookMode(settings) {
 }
 
 function withClaudeCommitAttributionPreference(settings) {
-  if (settings?.[CLAUDE_COAUTHOR_SETTING_KEY] === true) {
-    return settings;
-  }
-  return {
-    ...settings,
-    [CLAUDE_COAUTHOR_SETTING_KEY]: false,
-  };
+  return withCommitAttributionDisabled(settings);
 }
 
 function needsClaudeCommitAttributionPreferenceWrite(settings) {
-  return settings?.[CLAUDE_COAUTHOR_SETTING_KEY] !== false
-    && settings?.[CLAUDE_COAUTHOR_SETTING_KEY] !== true;
+  return !hasExplicitCommitAttributionPreference(settings);
 }
 
 function writeClaudePluginOptions(settingsPath, hooks) {

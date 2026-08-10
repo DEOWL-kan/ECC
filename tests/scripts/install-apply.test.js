@@ -936,6 +936,33 @@ function runTests() {
     }
   })) passed++; else failed++;
 
+  if (test('reinstall preserves an explicit attribution opt-in', () => {
+    const homeDir = createTempDir('install-apply-home-');
+    const projectDir = createTempDir('install-apply-project-');
+
+    try {
+      const claudeRoot = path.join(homeDir, '.claude');
+      fs.mkdirSync(claudeRoot, { recursive: true });
+      const settingsPath = path.join(claudeRoot, 'settings.json');
+      // `attribution` supersedes `includeCoAuthoredBy` in Claude Code, so writing
+      // the deprecated key here would be dead config that loses to the user's choice.
+      const customSettings = {
+        attribution: { commit: 'Signed-off-by: Someone <someone@example.com>' },
+        theme: 'dark',
+      };
+      fs.writeFileSync(settingsPath, JSON.stringify(customSettings, null, 2));
+
+      const install = run(['--profile', 'core'], { cwd: projectDir, homeDir });
+      assert.strictEqual(install.code, 0, install.stderr);
+
+      const afterInstall = readJson(settingsPath);
+      assert.deepStrictEqual(afterInstall, customSettings);
+    } finally {
+      cleanup(homeDir);
+      cleanup(projectDir);
+    }
+  })) passed++; else failed++;
+
   if (test('ignores malformed existing settings.json during claude install', () => {
     const homeDir = createTempDir('install-apply-home-');
     const projectDir = createTempDir('install-apply-project-');

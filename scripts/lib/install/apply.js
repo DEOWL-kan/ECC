@@ -4,6 +4,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
+const {
+  hasExplicitCommitAttributionPreference,
+  withCommitAttributionDisabled,
+} = require('../claude-commit-attribution');
 const { writeInstallState } = require('../install-state');
 const { filterMcpConfig, parseDisabledMcpServers } = require('../mcp-config');
 const { assertWithinTrustedRoot } = require('../path-safety');
@@ -120,26 +124,32 @@ function shouldSetClaudeCommitAttributionPreference(plan) {
 }
 
 function writeClaudeCommitAttributionPreference(settingsPath) {
-  let settings = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = readJsonObject(settingsPath, 'Claude settings');
-    } catch (_error) {
+  // Read once rather than probing with existsSync first. Checking for the file and
+  // then writing it is a file system race (CodeQL js/file-system-race), and a
+  // missing file is simply the fresh-install case.
+  let settings;
+  try {
+    settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      // Unreadable or malformed settings belong to the user; leave them untouched.
       return false;
     }
+    settings = {};
   }
 
-  if (settings.includeCoAuthoredBy === true) {
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    return false;
+  }
+
+  if (hasExplicitCommitAttributionPreference(settings)) {
     return false;
   }
 
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(
     settingsPath,
-    formatJson({
-      ...settings,
-      includeCoAuthoredBy: false,
-    }),
+    formatJson(withCommitAttributionDisabled(settings)),
     'utf8'
   );
   return true;
