@@ -76,7 +76,7 @@ First, detect which CLIs are available:
 ```bash
 command -v codex >/dev/null 2>&1 && echo "codex" || true
 command -v gemini >/dev/null 2>&1 && echo "gemini" || true
-command -v agy >/dev/null 2>&1 && echo "agy" || true
+test -x "$HOME/.claude/bin/codeagent-wrapper" && echo "antigravity" || true
 ```
 
 Build the reviewer prompt (identical rubric + instructions as Reviewer A) and write it to a unique temp file:
@@ -101,14 +101,18 @@ gemini -p "$(cat "$PROMPT_FILE")" -m gemini-2.5-pro
 rm -f "$PROMPT_FILE"
 ```
 
-**Antigravity CLI** (if installed and neither codex nor gemini is)
+**Antigravity backend** (if the CCG wrapper is installed and neither Codex nor Gemini is)
 ```bash
-agy -p "$(cat "$PROMPT_FILE")" --model gemini-3.6-flash-high --sandbox
+REVIEWER_ROLE="$HOME/.claude/.ccg/prompts/antigravity/reviewer.md"
+{
+  printf 'ROLE_FILE: %s\n' "$REVIEWER_ROLE"
+  cat "$PROMPT_FILE"
+} | "$HOME/.claude/bin/codeagent-wrapper" --backend antigravity - "$PWD"
 rm -f "$PROMPT_FILE"
 ```
-Despite the "flash" name, this outranks `gemini-3.1-pro-high` on every published coding/agentic benchmark (SWE-Bench Pro, Terminal-Bench, MLE-Bench) — Pro only leads on PhD-level reasoning benchmarks (GPQA, HLE), which aren't relevant to code review. Don't "correct" this back to a `-pro-` model by name alone; check current benchmarks first, since generation-over-tier ordering shifts release to release. Run `agy models` to see the current catalog before assuming this is stale.
+Do not hardcode a model ID here. The wrapper owns Antigravity model selection, so the workflow stays compatible as the backend catalog changes.
 
-**Claude Agent fallback** (only if none of `codex`, `gemini`, or `agy` is installed)
+**Claude Agent fallback** (only if Codex, Gemini, and the Antigravity wrapper are unavailable)
 Launch a second Claude Agent (subagent_type: `code-reviewer`, model: `opus`). Log a warning that both reviewers share the same model family — true model diversity was not achieved but context isolation is still enforced.
 
 In all cases, the reviewer must return the same structured JSON verdict as Reviewer A.
@@ -174,10 +178,9 @@ Result:     [PUSHED / ESCALATED TO USER]
 ## Notes
 
 - Reviewer A (Claude Opus) always runs — guarantees at least one strong reviewer regardless of tooling.
-- Model diversity is the goal for Reviewer B. GPT-5.4, Gemini 2.5 Pro, or Antigravity's Gemini 3.6 Flash (via `agy`) all give true independence — different training data, different biases, different blind spots. The Claude-only fallback still provides value via context isolation but loses model diversity.
-- Strongest available models are used: Opus for Reviewer A, GPT-5.4, Gemini 2.5 Pro, or Gemini 3.6 Flash High (`agy`) for Reviewer B, in that priority order.
-- Never point `agy` at a Claude model (`claude-sonnet-4-6`, `claude-opus-4-6-thinking`) — Reviewer A is already Claude Opus, so that would eliminate model diversity entirely.
-- External reviewers run with `--sandbox read-only` (Codex) or `--sandbox` (`agy`) to prevent repo mutation during review.
+- Model diversity is the goal for Reviewer B. Codex, Gemini, or the Antigravity backend provides a different provider family from Reviewer A. The Claude-only fallback still provides value via context isolation but loses model diversity.
+- Use each backend's maintained model-selection contract. Do not pin a transient Antigravity model ID in this workflow.
+- External reviewers use their supported restricted execution path. Codex runs with `--sandbox read-only`; Antigravity runs through the CCG wrapper instead of an undocumented direct CLI contract.
 - Fresh reviewers each round prevents anchoring bias from prior findings.
 - The rubric is the most important input. Tighten it if reviewers rubber-stamp or flag subjective style issues.
 - Commits happen on NAUGHTY rounds so fixes are preserved even if the loop is interrupted.
