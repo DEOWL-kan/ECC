@@ -157,10 +157,10 @@ Access to 68 agents, 284 skills, and 94 legacy command shims, plus hooks, rules,
 | AgentShield      |    Included | Scanning for prompts, hooks, MCP config, permissions, secrets, and agent files       |
 
 <p align="center">
-  <a href="https://www.star-history.com/#affaan-m/ECC&Date">
+  <a href="https://www.star-history.com/affaan-m/ecc">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=affaan-m/ECC&type=Date&theme=dark" />
-      <img src="https://api.star-history.com/svg?repos=affaan-m/ECC&type=Date" alt="ECC star history chart" width="100%" />
+      <source media="(prefers-color-scheme: dark)" srcset="assets/star-history-dark.svg" />
+      <img src="assets/star-history-light.svg" alt="ECC star history: first 40,000 stars, January 18 to February 7, 2026" width="100%" />
     </picture>
   </a>
 </p>
