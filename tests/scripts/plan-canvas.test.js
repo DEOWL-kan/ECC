@@ -139,7 +139,12 @@ async function main() {
 
   if (await test('GET /health identifies the app and version', async () => {
     const res = await request(port, 'GET', '/health');
-    assert.deepStrictEqual(jsonBody(res), { ok: true, app: 'ecc-plan-canvas', version: '9.9.9-test' });
+    assert.deepStrictEqual(jsonBody(res), {
+      ok: true,
+      app: 'ecc-plan-canvas',
+      version: '9.9.9-test',
+      protocolVersion: 2
+    });
   })) passed++; else failed++;
 
   if (await test('requests with a non-loopback Host header are rejected', async () => {

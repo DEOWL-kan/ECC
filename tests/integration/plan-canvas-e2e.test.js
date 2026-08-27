@@ -54,6 +54,31 @@ function cli(env, args, { timeoutMs = 15000 } = {}) {
   return { ...result, parsed };
 }
 
+function cliAsync(env, args, { timeoutMs = 15000 } = {}) {
+  return new Promise(resolve => {
+    const child = spawn('node', [CLI, ...args], { env: { ...process.env, ...env } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', chunk => {
+      stderr += chunk;
+    });
+    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
+      let parsed = null;
+      try {
+        parsed = JSON.parse(stdout.trim());
+      } catch {
+        // leave null; callers assert
+      }
+      resolve({ status, signal, stdout, stderr, parsed });
+    });
+  });
+}
+
 function request(port, method, requestPath, body = null) {
   return new Promise((resolve, reject) => {
     const payload = body === null ? null : JSON.stringify(body);
@@ -117,6 +142,49 @@ async function main() {
   let key = null;
 
   try {
+    await test('same-version legacy server is replaced before a canvas opens', async () => {
+      const legacyPort = port + 1;
+      const legacyStateDir = path.join(tmp, 'legacy-state');
+      const legacyEnv = {
+        ECC_PLAN_CANVAS_STATE_DIR: legacyStateDir,
+        ECC_PLAN_CANVAS_PORT: String(legacyPort)
+      };
+      const version = require('../../package.json').version;
+      let shutdownRequested = false;
+      const legacyServer = http.createServer((req, res) => {
+        if (req.method === 'GET' && req.url === '/health') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ ok: true, app: 'ecc-plan-canvas', version }));
+        }
+        if (req.method === 'POST' && req.url === '/shutdown') {
+          shutdownRequested = true;
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ status: 'stopping' }));
+          return setImmediate(() => legacyServer.close());
+        }
+        res.writeHead(503, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'legacy server handled a current CLI request' }));
+      });
+      await new Promise((resolve, reject) => {
+        legacyServer.once('error', reject);
+        legacyServer.listen(legacyPort, '127.0.0.1', resolve);
+      });
+
+      try {
+        const result = await cliAsync(legacyEnv, ['open', plan, '--no-open']);
+        assert.strictEqual(result.status, 0, result.stderr);
+        assert.strictEqual(result.parsed.status, 'open');
+        assert.strictEqual(shutdownRequested, true, 'current CLI should retire the stale server');
+        const health = JSON.parse((await request(legacyPort, 'GET', '/health')).body);
+        assert.strictEqual(health.protocolVersion, 2);
+      } finally {
+        if (legacyServer.listening) {
+          await new Promise(resolve => legacyServer.close(resolve));
+        }
+        cli(legacyEnv, ['stop']);
+      }
+    });
+
     await test('agent opens the plan: detached server starts, session created', async () => {
       const result = cli(env, ['open', plan, '--no-open']);
       assert.strictEqual(result.status, 0, result.stderr);
