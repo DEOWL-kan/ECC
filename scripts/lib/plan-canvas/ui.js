@@ -24,28 +24,32 @@ function mermaidUrl(env = process.env) {
   return override && String(override).trim() ? String(override).trim() : DEFAULT_MERMAID_URL;
 }
 
-// Browser module that renders `<pre class="mermaid">` blocks, themed to match
-// the ECC canvas. Kept import-only so a CDN failure degrades gracefully.
+// Browser enhancement that renders `<pre class="mermaid">` blocks, themed to
+// match the ECC canvas. Start the remote import only after `load`: an async
+// event listener is not awaited by the browser, so a stalled CDN can never
+// keep the artifact iframe or the outer Canvas page in a loading state.
 function mermaidLoaderScript(url) {
-  return `<script type="module">
-  try {
-    const mermaid = (await import(${JSON.stringify(url)})).default;
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: 'strict',
-      theme: 'dark',
-      fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
-      themeVariables: {
-        primaryColor: '#13161e', primaryBorderColor: '#6885e8', primaryTextColor: '#dfe2e9',
-        lineColor: '#80859a', secondaryColor: '#191d2a', tertiaryColor: '#101218',
-        background: '#080a0e', mainBkg: '#13161e', clusterBkg: '#0d0f14'
-      }
-    });
-    await mermaid.run({ querySelector: '.mermaid' });
-  } catch (err) {
-    document.querySelectorAll('.mermaid').forEach(el => el.classList.add('mermaid-unrendered'));
-    console.warn('Mermaid render skipped:', err && err.message);
-  }
+  return `<script>
+  window.addEventListener('load', async () => {
+    try {
+      const mermaid = (await import(${JSON.stringify(url)})).default;
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme: 'dark',
+        fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+        themeVariables: {
+          primaryColor: '#13161e', primaryBorderColor: '#6885e8', primaryTextColor: '#dfe2e9',
+          lineColor: '#80859a', secondaryColor: '#191d2a', tertiaryColor: '#101218',
+          background: '#080a0e', mainBkg: '#13161e', clusterBkg: '#0d0f14'
+        }
+      });
+      await mermaid.run({ querySelector: '.mermaid' });
+    } catch (err) {
+      document.querySelectorAll('.mermaid').forEach(el => el.classList.add('mermaid-unrendered'));
+      console.warn('Mermaid render skipped:', err && err.message);
+    }
+  }, { once: true });
 </script>`;
 }
 
