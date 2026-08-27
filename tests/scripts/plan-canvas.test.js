@@ -204,6 +204,12 @@ async function main() {
     assert.ok(res.body.includes('<pre class="mermaid">'), 'diagram container present');
     assert.ok(res.body.includes('mermaid.run'), 'loader injected');
     assert.ok(res.body.includes("securityLevel: 'strict'"), 'sanitizing config present');
+    const loadListenerIndex = res.body.indexOf("window.addEventListener('load'");
+    const remoteImportIndex = res.body.indexOf('await import(');
+    assert.ok(
+      loadListenerIndex >= 0 && loadListenerIndex < remoteImportIndex,
+      'remote Mermaid enhancement must start after document load so a stalled CDN cannot hold the page open'
+    );
     await request(port, 'POST', '/api/end', { body: { file: diagram } });
   })) passed++; else failed++;
 
