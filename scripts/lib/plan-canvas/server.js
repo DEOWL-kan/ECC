@@ -10,6 +10,7 @@
  */
 
 const { EventEmitter } = require('events');
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
@@ -36,7 +37,32 @@ const DEFAULT_THINKING_STALE_MS = 90 * 1000;
 const DEFAULT_TYPING_EXPIRY_MS = 30 * 1000;
 // Presence is push-based, so expiring states need a tick to re-broadcast on.
 const DEFAULT_PRESENCE_SWEEP_MS = 5 * 1000;
+const PLAN_CANVAS_PROTOCOL_VERSION = 2;
 const TYPING_STATES = new Set(['thinking', 'typing', 'idle']);
+
+// Package versions do not distinguish two worktrees on the same release.
+// Fingerprint every module loaded into the detached server so a current CLI
+// never reuses stale browser or protocol code from an older checkout.
+function computeRuntimeId() {
+  const sources = [
+    ['loopback-guard.js', path.join(__dirname, '..', 'loopback-guard.js')],
+    ['markdown.js', path.join(__dirname, 'markdown.js')],
+    ['sdk.js', path.join(__dirname, 'sdk.js')],
+    ['server.js', __filename],
+    ['sessions.js', path.join(__dirname, 'sessions.js')],
+    ['ui.js', path.join(__dirname, 'ui.js')]
+  ];
+  const digest = crypto.createHash('sha256');
+  for (const [name, sourcePath] of sources) {
+    digest.update(name);
+    digest.update('\0');
+    digest.update(fs.readFileSync(sourcePath));
+    digest.update('\0');
+  }
+  return digest.digest('hex').slice(0, 16);
+}
+
+const PLAN_CANVAS_RUNTIME_ID = computeRuntimeId();
 
 const CONTENT_TYPES = {
   '.css': 'text/css; charset=utf-8',
@@ -541,7 +567,13 @@ function createPlanCanvasServer({
     Promise.resolve()
       .then(() => {
         if (req.method === 'GET' && pathname === '/health') {
-          return sendJson(res, 200, { ok: true, app: 'ecc-plan-canvas', version });
+          return sendJson(res, 200, {
+            ok: true,
+            app: 'ecc-plan-canvas',
+            version,
+            protocolVersion: PLAN_CANVAS_PROTOCOL_VERSION,
+            runtimeId: PLAN_CANVAS_RUNTIME_ID
+          });
         }
         if (req.method === 'POST' && pathname === '/shutdown') {
           sendJson(res, 200, { status: 'stopping' });
@@ -628,6 +660,8 @@ module.exports = {
   DEFAULT_PORT,
   DEFAULT_THINKING_STALE_MS,
   DEFAULT_TYPING_EXPIRY_MS,
+  PLAN_CANVAS_PROTOCOL_VERSION,
+  PLAN_CANVAS_RUNTIME_ID,
   createPlanCanvasServer,
   resolveIdleTimeoutMs,
   resolvePort

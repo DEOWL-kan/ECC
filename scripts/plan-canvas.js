@@ -30,6 +30,8 @@ const {
 } = require('./lib/plan-canvas/sessions');
 const {
   DEFAULT_HOST,
+  PLAN_CANVAS_PROTOCOL_VERSION,
+  PLAN_CANVAS_RUNTIME_ID,
   createPlanCanvasServer,
   resolveIdleTimeoutMs,
   resolvePort
@@ -168,12 +170,21 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Start (or reuse) the detached canvas server and return its port. A version
-// mismatch after an ECC update restarts the server so browser and CLI never
-// disagree about the protocol.
+function serverIsCompatible(health) {
+  return Boolean(
+    health &&
+    health.version === VERSION &&
+    health.protocolVersion === PLAN_CANVAS_PROTOCOL_VERSION &&
+    health.runtimeId === PLAN_CANVAS_RUNTIME_ID
+  );
+}
+
+// Start (or reuse) the detached canvas server and return its port. Worktrees
+// can share a package version while carrying different Canvas code, so the
+// health handshake binds reuse to the exact server runtime as well.
 async function ensureServer({ stateDir, port }) {
   const health = await healthCheck(port);
-  if (health && health.version === VERSION) return port;
+  if (serverIsCompatible(health)) return port;
   if (health) {
     await request(port, 'POST', '/shutdown').catch(() => {});
     for (let i = 0; i < 20 && (await healthCheck(port)); i++) await sleep(100);
@@ -189,9 +200,9 @@ async function ensureServer({ stateDir, port }) {
   fs.closeSync(logFd);
   for (let i = 0; i < 50; i++) {
     await sleep(100);
-    if (await healthCheck(port)) return port;
+    if (serverIsCompatible(await healthCheck(port))) return port;
   }
-  throw new Error(`plan-canvas server did not become healthy on port ${port}; check ${path.join(stateDir, 'server.log')}`);
+  throw new Error(`plan-canvas server did not become compatible on port ${port}; check ${path.join(stateDir, 'server.log')}`);
 }
 
 function openBrowser(url) {
@@ -218,7 +229,13 @@ async function cmdStatus({ stateDir, port }) {
     return { server: 'not running', hint: 'open an artifact to start one', stateDir };
   }
   const sessions = await request(port, 'GET', '/api/sessions');
-  return { server: `http://${DEFAULT_HOST}:${port}`, version: health.version, sessions: sessions.body.sessions };
+  return {
+    server: `http://${DEFAULT_HOST}:${port}`,
+    version: health.version,
+    protocolVersion: health.protocolVersion,
+    runtimeId: health.runtimeId,
+    sessions: sessions.body.sessions
+  };
 }
 
 async function cmdOpen(file, args, { stateDir, port }) {
@@ -364,7 +381,14 @@ async function cmdServer(args, { stateDir, port }) {
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(
     serverInfoPath(stateDir),
-    JSON.stringify({ pid: process.pid, port: bound.port, version: VERSION, startedAt: new Date().toISOString() }, null, 2)
+    JSON.stringify({
+      pid: process.pid,
+      port: bound.port,
+      version: VERSION,
+      protocolVersion: PLAN_CANVAS_PROTOCOL_VERSION,
+      runtimeId: PLAN_CANVAS_RUNTIME_ID,
+      startedAt: new Date().toISOString()
+    }, null, 2)
   );
   // Sessions restored from disk resume their file watchers.
   for (const session of store.list()) {

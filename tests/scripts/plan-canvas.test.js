@@ -14,7 +14,10 @@ const os = require('os');
 const path = require('path');
 
 const { createSessionStore } = require('../../scripts/lib/plan-canvas/sessions');
-const { createPlanCanvasServer } = require('../../scripts/lib/plan-canvas/server');
+const {
+  PLAN_CANVAS_RUNTIME_ID,
+  createPlanCanvasServer
+} = require('../../scripts/lib/plan-canvas/server');
 
 async function test(name, fn) {
   try {
@@ -143,7 +146,8 @@ async function main() {
       ok: true,
       app: 'ecc-plan-canvas',
       version: '9.9.9-test',
-      protocolVersion: 2
+      protocolVersion: 2,
+      runtimeId: PLAN_CANVAS_RUNTIME_ID
     });
   })) passed++; else failed++;
 
