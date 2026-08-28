@@ -115,9 +115,9 @@ function assertLoopbackUrl(value) {
 function isCompletePdf(file, fsImpl = fs) {
   let fd;
   try {
-    const stat = fsImpl.statSync(file);
-    if (!stat.isFile() || stat.size < 12) return false;
     fd = fsImpl.openSync(file, 'r');
+    const stat = fsImpl.fstatSync(fd);
+    if (!stat.isFile() || stat.size < 12) return false;
     const head = Buffer.alloc(5);
     fsImpl.readSync(fd, head, 0, head.length, 0);
     const tailLength = Math.min(2048, stat.size);

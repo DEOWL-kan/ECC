@@ -102,6 +102,28 @@ async function main() {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
+  await test('validates PDF metadata from the opened file handle', () => {
+    const content = Buffer.from('%PDF-1.4\nlocal plan\n%%EOF\n');
+    const fsImpl = {
+      openSync(file, flags) {
+        assert.strictEqual(file, '/private/export.pdf');
+        assert.strictEqual(flags, 'r');
+        return 41;
+      },
+      fstatSync(fd) {
+        assert.strictEqual(fd, 41);
+        return { isFile: () => true, size: content.length };
+      },
+      readSync(fd, target, offset, length, position) {
+        assert.strictEqual(fd, 41);
+        return content.copy(target, offset, position, position + length);
+      },
+      closeSync(fd) { assert.strictEqual(fd, 41); },
+      statSync() { throw new Error('path metadata must not be checked before opening'); }
+    };
+    assert.strictEqual(isCompletePdf('/private/export.pdf', fsImpl), true);
+  });
+
   await test('renders, terminates its private browser, and removes temporary state', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-pdf-test-'));
     let spawned = null;
