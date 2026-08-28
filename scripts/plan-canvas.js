@@ -19,6 +19,7 @@
 
 const fs = require('fs');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -171,6 +172,73 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function serverStartLockPath(port, lockDir = os.tmpdir()) {
+  const userId = typeof process.getuid === 'function' ? process.getuid() : 'user';
+  return path.join(lockDir, `ecc-plan-canvas-${userId}-${validatePort(port)}.lock`);
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+function removeStaleServerStartLock(lockPath, staleAfterMs = 60 * 1000) {
+  try {
+    const stat = fs.statSync(lockPath);
+    let owner = null;
+    try { owner = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch { /* incomplete lock owner */ }
+    const oldEnough = Date.now() - stat.mtimeMs > staleAfterMs;
+    if (!oldEnough && (!owner || processIsAlive(owner.pid))) return false;
+    fs.rmSync(lockPath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function withServerStartLock(port, task, {
+  lockDir = os.tmpdir(),
+  timeoutMs = 15 * 1000
+} = {}) {
+  fs.mkdirSync(lockDir, { recursive: true });
+  const lockPath = serverStartLockPath(port, lockDir);
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const startedAt = Date.now();
+
+  while (true) {
+    try {
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }), {
+        flag: 'wx',
+        mode: 0o600
+      });
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (removeStaleServerStartLock(lockPath)) continue;
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error(`timed out waiting for Plan Canvas startup lock on port ${port}`);
+      }
+      await sleep(50);
+    }
+  }
+
+  try {
+    return await task();
+  } finally {
+    try {
+      const owner = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      if (owner.token === token) fs.rmSync(lockPath, { force: true });
+    } catch {
+      // A stale-lock recovery may already have removed it.
+    }
+  }
+}
+
 function serverIsCompatible(health) {
   return Boolean(
     health &&
@@ -186,24 +254,28 @@ function serverIsCompatible(health) {
 async function ensureServer({ stateDir, port }) {
   const health = await healthCheck(port);
   if (serverIsCompatible(health)) return port;
-  if (health) {
-    await request(port, 'POST', '/shutdown').catch(() => {});
-    for (let i = 0; i < 20 && (await healthCheck(port)); i++) await sleep(100);
-  }
-  fs.mkdirSync(stateDir, { recursive: true });
-  const logFd = fs.openSync(path.join(stateDir, 'server.log'), 'a');
-  const child = spawn(process.execPath, [__filename, 'server', '--port', String(port)], {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
-    env: { ...process.env, ECC_PLAN_CANVAS_STATE_DIR: stateDir }
+  return withServerStartLock(port, async () => {
+    const lockedHealth = await healthCheck(port);
+    if (serverIsCompatible(lockedHealth)) return port;
+    if (lockedHealth) {
+      await request(port, 'POST', '/shutdown').catch(() => {});
+      for (let i = 0; i < 20 && (await healthCheck(port)); i++) await sleep(100);
+    }
+    fs.mkdirSync(stateDir, { recursive: true });
+    const logFd = fs.openSync(path.join(stateDir, 'server.log'), 'a');
+    const child = spawn(process.execPath, [__filename, 'server', '--port', String(port)], {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: { ...process.env, ECC_PLAN_CANVAS_STATE_DIR: stateDir }
+    });
+    child.unref();
+    fs.closeSync(logFd);
+    for (let i = 0; i < 50; i++) {
+      await sleep(100);
+      if (serverIsCompatible(await healthCheck(port))) return port;
+    }
+    throw new Error(`plan-canvas server did not become compatible on port ${port}; check ${path.join(stateDir, 'server.log')}`);
   });
-  child.unref();
-  fs.closeSync(logFd);
-  for (let i = 0; i < 50; i++) {
-    await sleep(100);
-    if (serverIsCompatible(await healthCheck(port))) return port;
-  }
-  throw new Error(`plan-canvas server did not become compatible on port ${port}; check ${path.join(stateDir, 'server.log')}`);
 }
 
 function openBrowser(url) {
@@ -434,4 +506,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, ensureServer, healthCheck };
+module.exports = { main, ensureServer, healthCheck, withServerStartLock };

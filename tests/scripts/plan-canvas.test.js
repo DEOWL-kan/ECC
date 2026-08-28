@@ -92,13 +92,18 @@ async function main() {
   const artifact = path.join(tmp, 'demo.plan.md');
   fs.writeFileSync(artifact, '# Plan: Demo\n\n## Files to Change\n\n| File | Action |\n|---|---|\n| `a.js` | UPDATE |\n');
   const htmlArtifact = path.join(tmp, 'report.html');
-  fs.writeFileSync(htmlArtifact, '<!DOCTYPE html><html><body><h1>Report</h1></body></html>');
+  fs.writeFileSync(
+    htmlArtifact,
+    '<!DOCTYPE html><html><body><h1>Report</h1><img src="https://example.invalid/tracker.png"><script>navigator.sendBeacon("https://example.invalid/beacon", "plan")</script></body></html>'
+  );
   fs.writeFileSync(path.join(tmp, 'style.css'), 'body { color: red }');
   const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-outside-'));
   fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'secret');
 
   const store = createSessionStore({ stateDir: path.join(tmp, 'state') });
   const pdfRequests = [];
+  let holdPdfExport = false;
+  let releasePdfExport = null;
   let idleFired = false;
   const canvas = createPlanCanvasServer({
     store,
@@ -107,6 +112,7 @@ async function main() {
     idleTimeoutMs: 0,
     pdfExporter: async options => {
       pdfRequests.push(options);
+      if (holdPdfExport) await new Promise(resolve => { releasePdfExport = resolve; });
       return { buffer: Buffer.from('%PDF-1.4\n%%EOF\n'), filename: 'demo.pdf' };
     },
     onIdleShutdown: () => {
@@ -200,6 +206,19 @@ async function main() {
     assert.ok(res.body.includes('<script src="/sdk.js"></script>\n</body>'));
   })) passed++; else failed++;
 
+  if (await test('PDF artifact responses block remote images and inline beacon egress', async () => {
+    const res = await request(port, 'GET', `/artifact/${htmlKey}/?pdf=1`);
+    const csp = res.headers['content-security-policy'];
+    assert.strictEqual(res.statusCode, 200);
+    assert.ok(csp.includes("default-src 'none'"));
+    assert.ok(csp.includes("img-src 'self' data:"));
+    assert.ok(csp.includes("connect-src 'none'"));
+    assert.ok(csp.includes("form-action 'none'"));
+    assert.ok(csp.includes("script-src 'none'"));
+    assert.ok(res.body.includes('https://example.invalid/tracker.png'));
+    assert.ok(res.body.includes('navigator.sendBeacon'));
+  })) passed++; else failed++;
+
   if (await test('sibling assets are served, traversal is blocked', async () => {
     const ok = await request(port, 'GET', `/artifact/${key}/style.css`);
     assert.strictEqual(ok.statusCode, 200);
@@ -213,11 +232,17 @@ async function main() {
       const res = await request(port, 'GET', asset);
       assert.strictEqual(res.statusCode, 200, `${asset} should be 200`);
     }
+    const sdk = await request(port, 'GET', '/sdk.js');
+    assert.doesNotThrow(() => new Function(sdk.body));
+    assert.ok(sdk.body.includes("msg.type === 'pc:export-snapshot'"));
+    assert.ok(sdk.body.includes("querySelectorAll('script,iframe,object,embed,form,base,meta[http-equiv]"));
   })) passed++; else failed++;
 
   if (await test('Download PDF fetches a generated PDF and starts a browser download', async () => {
     const client = await request(port, 'GET', '/client.js');
     assert.ok(client.body.includes("'/api/session/' + key + '/pdf'"));
+    assert.ok(client.body.includes("method: snapshot ? 'POST' : 'GET'"));
+    assert.ok(client.body.includes("type: 'pc:export-snapshot'"));
     assert.ok(client.body.includes('URL.createObjectURL'));
 
     const res = await request(port, 'GET', `/api/session/${key}/pdf`);
@@ -229,6 +254,28 @@ async function main() {
     assert.strictEqual(pdfRequests.length, 1);
     assert.strictEqual(pdfRequests[0].artifactFile, fs.realpathSync(artifact));
     assert.strictEqual(pdfRequests[0].url, `http://127.0.0.1:${port}/artifact/${key}/?pdf=1`);
+  })) passed++; else failed++;
+
+  if (await test('concurrent PDF exports return a bounded retryable overload response', async () => {
+    holdPdfExport = true;
+    const snapshot = '<!doctype html><html><body><h1>Already rendered diagram</h1><svg><text>Local SVG</text></svg><script>fetch("https://example.invalid")</script></body></html>';
+    const first = request(port, 'POST', `/api/session/${key}/pdf`, { body: { html: snapshot } });
+    await waitFor(() => typeof releasePdfExport === 'function');
+    const printable = await request(port, 'GET', `/artifact/${key}/?pdf=1`);
+    assert.ok(printable.body.includes('Already rendered diagram'));
+    assert.ok(printable.body.includes('Local SVG'));
+    assert.ok(printable.headers['content-security-policy'].includes("script-src 'none'"));
+    const overloaded = await request(port, 'GET', `/api/session/${key}/pdf`);
+    assert.strictEqual(overloaded.statusCode, 429);
+    assert.strictEqual(overloaded.headers['retry-after'], '1');
+    assert.deepStrictEqual(jsonBody(overloaded), {
+      error: 'another PDF export is already in progress',
+      code: 'PDF_EXPORT_BUSY'
+    });
+    releasePdfExport();
+    assert.strictEqual((await first).statusCode, 200);
+    holdPdfExport = false;
+    releasePdfExport = null;
   })) passed++; else failed++;
 
   if (await test('browser client uses finite polling instead of one permanent connection per canvas', async () => {

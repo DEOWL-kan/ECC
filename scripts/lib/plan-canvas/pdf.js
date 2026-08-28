@@ -11,6 +11,7 @@
 
 const { spawn } = require('child_process');
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 
@@ -137,6 +138,33 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function startDenyProxy(netImpl = net) {
+  return new Promise((resolve, reject) => {
+    const server = netImpl.createServer(socket => {
+      socket.on('error', () => {});
+      socket.destroy();
+    });
+    const onError = error => reject(errorWithCode(
+      `Could not isolate PDF renderer network access (${error.message})`,
+      'PDF_EXPORT_FAILED'
+    ));
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', onError);
+      server.on('error', () => {});
+      server.unref();
+      resolve({ server, url: `http://127.0.0.1:${server.address().port}` });
+    });
+  });
+}
+
+function stopDenyProxy(server) {
+  if (!server) return Promise.resolve();
+  return new Promise(resolve => {
+    try { server.close(resolve); } catch { resolve(); }
+  });
+}
+
 async function stopChild(child) {
   if (!child || child.exitCode !== null || child.signalCode) return;
   const closed = new Promise(resolve => child.once('close', resolve));
@@ -195,9 +223,11 @@ async function exportPdf({
   timeoutMs = DEFAULT_EXPORT_TIMEOUT_MS,
   spawnImpl = spawn,
   fsImpl = fs,
-  osImpl = os
+  osImpl = os,
+  netImpl = net
 } = {}) {
   const safeUrl = assertLoopbackUrl(url);
+  const exportUrl = new URL(safeUrl);
   const browser = executable || resolveChromiumExecutable({ env, platform, fsImpl });
   if (!browser) {
     const override = String(env.ECC_PLAN_CANVAS_CHROME_PATH || '').trim();
@@ -214,14 +244,18 @@ async function exportPdf({
   const profileDir = path.join(tempDir, 'profile');
   fsImpl.mkdirSync(profileDir, { recursive: true });
   let child = null;
+  let denyProxy = null;
   try {
+    denyProxy = await startDenyProxy(netImpl);
     const args = [
       '--headless=new',
+      '--disable-background-networking',
       '--disable-gpu',
       '--disable-component-update',
       '--disable-default-apps',
       '--disable-extensions',
       '--disable-sync',
+      '--disable-quic',
       '--metrics-recording-only',
       '--mute-audio',
       '--no-first-run',
@@ -229,6 +263,9 @@ async function exportPdf({
       '--no-pdf-header-footer',
       '--print-to-pdf-no-header',
       '--hide-scrollbars',
+      `--proxy-server=${denyProxy.url}`,
+      `--proxy-bypass-list=<-loopback>;${exportUrl.origin}`,
+      `--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE ${exportUrl.hostname}`,
       `--user-data-dir=${profileDir}`,
       `--print-to-pdf=${outputFile}`,
       '--virtual-time-budget=5000',
@@ -247,6 +284,7 @@ async function exportPdf({
     return { buffer, filename: pdfFileName(artifactFile) };
   } finally {
     await stopChild(child);
+    await stopDenyProxy(denyProxy && denyProxy.server);
     fsImpl.rmSync(tempDir, { recursive: true, force: true });
   }
 }

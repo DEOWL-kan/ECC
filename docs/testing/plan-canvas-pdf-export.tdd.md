@@ -14,17 +14,20 @@ artifact as a real PDF file without sending the plan to an external converter.
 | Only a loopback artifact URL can reach the renderer | `assertLoopbackUrl` tests | PASS |
 | Filenames are useful and safe across platforms | `pdfFileName` tests | PASS |
 | Incomplete output is never served as a PDF | `%PDF` header and `%%EOF` completion tests | PASS |
+| Validation uses the opened file handle | File-descriptor regression test and CodeQL rerun | PASS |
 | Renderer state is private and temporary | Fake-process lifecycle test and live process/temp-state inspection | PASS |
+| Artifact HTML cannot make outbound export requests | PDF-only CSP and loopback-origin deny-proxy regression tests | PASS |
+| Browser renderer concurrency is bounded | Concurrent endpoint test expects HTTP 429 and `Retry-After` | PASS |
 | Export adds no cloud converter or npm runtime dependency | Implementation and package diff inspection | PASS |
 
 ## Red and green
 
 - RED: the focused server suite produced 30 passes and 2 failures because the
   Canvas had no Download PDF control or PDF endpoint.
-- GREEN: renderer unit tests pass 6/6, Plan Canvas server tests pass 32/32,
-  and the end-to-end review workflow passes 10/10.
-- FULL SUITE: `npm test` passes all 4,003 discovered tests; full ESLint,
-  Markdown lint, package dry-run, and `git diff --check` also pass.
+- GREEN: renderer unit tests pass 7/7, Plan Canvas server tests pass 34/34,
+  and the end-to-end review workflow passes 11/11.
+- FULL SUITE: the final review-hardened implementation passes all 4,007
+  discovered tests; hosted security reruns are recorded on PR #2894.
 - COVERAGE: `npm run coverage` passes 4,003/4,003 with 88.97% statements,
   80.58% branches, 94.22% functions, and 88.97% lines. The Plan Canvas
   module group reaches 96.72% statements and lines, 84.47% branches, and
@@ -42,9 +45,12 @@ artifact as a real PDF file without sending the plan to an external converter.
 
 The loopback server discovers Google Chrome, Chromium, or Microsoft Edge, or
 uses `ECC_PLAN_CANVAS_CHROME_PATH`. It launches the executable without a shell,
-with a private temporary profile and a loopback-only artifact URL. Completion
-requires both a `%PDF-` header and `%%EOF` marker. The renderer is terminated and
-temporary state is removed before the response is handed to the browser.
+with a private temporary profile, a loopback-only artifact URL, an export-only
+CSP, and a local deny proxy that allows only the exact Canvas origin. Completion
+requires both a `%PDF-` header and `%%EOF` marker read from the already-open file
+handle. The renderer is terminated and temporary state is removed before the
+response is handed to the browser. Concurrent export attempts fail quickly with
+a retryable HTTP 429 response while one renderer is active.
 
 If no renderer exists, the browser receives an actionable local error. Plan
 Canvas does not upload the artifact or add a hosted conversion dependency.

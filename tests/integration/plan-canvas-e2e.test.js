@@ -25,6 +25,7 @@ const { spawn, spawnSync } = require('child_process');
 
 const CLI = path.join(__dirname, '..', '..', 'scripts', 'plan-canvas.js');
 const HOOK = path.join(__dirname, '..', '..', 'scripts', 'hooks', 'plan-canvas-sessions.js');
+const { withServerStartLock } = require('../../scripts/plan-canvas');
 
 const results = [];
 async function test(name, fn) {
@@ -142,7 +143,22 @@ async function main() {
   let key = null;
 
   try {
-    await test('same-version legacy server is replaced before a canvas opens', async () => {
+    await test('port-scoped startup lock serializes server replacement callers', async () => {
+      let active = 0;
+      let maximumActive = 0;
+      const runLocked = label => withServerStartLock(port + 2, async () => {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise(resolve => setTimeout(resolve, 40));
+        active -= 1;
+        return label;
+      }, { lockDir: tmp, timeoutMs: 2000 });
+      assert.deepStrictEqual(await Promise.all([runLocked('first'), runLocked('second')]), ['first', 'second']);
+      assert.strictEqual(maximumActive, 1);
+      assert.ok(!fs.readdirSync(tmp).some(name => name.endsWith('.lock')));
+    });
+
+    await test('concurrent opens serialize replacement of a same-version legacy server', async () => {
       const legacyPort = port + 1;
       const legacyStateDir = path.join(tmp, 'legacy-state');
       const legacyEnv = {
@@ -171,9 +187,14 @@ async function main() {
       });
 
       try {
-        const result = await cliAsync(legacyEnv, ['open', plan, '--no-open']);
-        assert.strictEqual(result.status, 0, result.stderr);
-        assert.strictEqual(result.parsed.status, 'open');
+        const results = await Promise.all([
+          cliAsync(legacyEnv, ['open', plan, '--no-open']),
+          cliAsync(legacyEnv, ['open', plan, '--no-open'])
+        ]);
+        for (const result of results) {
+          assert.strictEqual(result.status, 0, result.stderr);
+          assert.strictEqual(result.parsed.status, 'open');
+        }
         assert.strictEqual(shutdownRequested, true, 'current CLI should retire the stale server');
         const health = JSON.parse((await request(legacyPort, 'GET', '/health')).body);
         assert.strictEqual(health.protocolVersion, 4);

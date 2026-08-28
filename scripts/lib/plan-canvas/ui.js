@@ -271,6 +271,7 @@ function canvasClientJs() {
   function postToFrame(msg) {
     if (frame.contentWindow) frame.contentWindow.postMessage(msg, '*');
   }
+  const snapshotWaiters = new Map();
   window.addEventListener('message', e => {
     if (e.source !== frame.contentWindow) return;
     const msg = e.data || {};
@@ -278,11 +279,32 @@ function canvasClientJs() {
     else if (msg.type === 'pc:queue-and-send' && msg.item) { addToQueue(msg.item); send(); }
     else if (msg.type === 'pc:scroll') lastScroll = { x: msg.x || 0, y: msg.y || 0 };
     else if (msg.type === 'pc:toggle-mode') setAnnotate(!annotate);
+    else if (msg.type === 'pc:export-snapshot-result' && typeof msg.requestId === 'string') {
+      const waiter = snapshotWaiters.get(msg.requestId);
+      if (waiter) {
+        snapshotWaiters.delete(msg.requestId);
+        waiter(msg.html);
+      }
+    }
     else if (msg.type === 'pc:ready') {
       postToFrame({ type: 'pc:set-mode', annotate });
       postToFrame({ type: 'pc:restore-scroll', x: lastScroll.x, y: lastScroll.y });
     }
   });
+  function requestArtifactSnapshot() {
+    return new Promise(resolve => {
+      const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2);
+      const timer = setTimeout(() => {
+        snapshotWaiters.delete(requestId);
+        resolve(null);
+      }, 1500);
+      snapshotWaiters.set(requestId, html => {
+        clearTimeout(timer);
+        resolve(typeof html === 'string' ? html : null);
+      });
+      postToFrame({ type: 'pc:export-snapshot', requestId });
+    });
+  }
 
   // --- queue ----------------------------------------------------------
   function persistQueue() { try { sessionStorage.setItem(QKEY, JSON.stringify(queue)); } catch { /* full */ } }
@@ -442,7 +464,13 @@ function canvasClientJs() {
     downloadPdfBtn.textContent = 'Preparing PDF\u2026';
     reportExportStatus('Rendering locally\u2026');
     try {
-      const res = await fetch('/api/session/' + key + '/pdf', { cache: 'no-store' });
+      const snapshot = await requestArtifactSnapshot();
+      const res = await fetch('/api/session/' + key + '/pdf', {
+        method: snapshot ? 'POST' : 'GET',
+        headers: snapshot ? { 'content-type': 'application/json' } : undefined,
+        body: snapshot ? JSON.stringify({ html: snapshot }) : undefined,
+        cache: 'no-store'
+      });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
         throw new Error(detail.error || ('HTTP ' + res.status));

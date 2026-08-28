@@ -15,17 +15,15 @@ const {
   resolveChromiumExecutable
 } = require('../../scripts/lib/plan-canvas/pdf');
 
-const results = [];
-
 async function test(name, fn) {
   try {
     await fn();
     console.log(`  ✓ ${name}`);
-    results.push(true);
+    return true;
   } catch (error) {
     console.log(`  ✗ ${name}`);
     console.log(`    ${error.stack || error.message}`);
-    results.push(false);
+    return false;
   }
 }
 
@@ -48,15 +46,19 @@ function fakeChild(onSpawn) {
 
 async function main() {
   console.log('\n=== Testing Plan Canvas PDF export ===\n');
+  let results = [];
+  const record = async (name, fn) => {
+    results = [...results, await test(name, fn)];
+  };
 
-  await test('builds safe, useful PDF filenames', () => {
+  await record('builds safe, useful PDF filenames', () => {
     assert.strictEqual(pdfFileName('/tmp/feature-fleet-2.2.plan.md'), 'feature-fleet-2.2.pdf');
     assert.strictEqual(pdfFileName('/tmp/release-preview.html'), 'release-preview.pdf');
     assert.strictEqual(pdfFileName('/tmp/bad:name?.md'), 'bad-name-.pdf');
     assert.strictEqual(pdfFileName(''), 'plan.pdf');
   });
 
-  await test('restricts the renderer to loopback artifact URLs', () => {
+  await record('restricts the renderer to loopback artifact URLs', () => {
     assert.strictEqual(
       assertLoopbackUrl('http://127.0.0.1:4518/artifact/abc/?pdf=1'),
       'http://127.0.0.1:4518/artifact/abc/?pdf=1'
@@ -65,7 +67,7 @@ async function main() {
     assert.throws(() => assertLoopbackUrl('http://example.com/artifact/abc'), { code: 'PDF_EXPORT_INVALID_URL' });
   });
 
-  await test('honors an explicit Chromium executable override', () => {
+  await record('honors an explicit Chromium executable override', () => {
     const fsImpl = {
       accessSync(file) { assert.strictEqual(file, '/opt/test/chrome'); },
       statSync() { return { isFile: () => true }; }
@@ -80,7 +82,7 @@ async function main() {
     );
   });
 
-  await test('fails actionably when no local PDF renderer is installed', async () => {
+  await record('fails actionably when no local PDF renderer is installed', async () => {
     await assert.rejects(
       exportPdf({
         url: 'http://127.0.0.1:4517/artifact/abc123/?pdf=1',
@@ -92,7 +94,7 @@ async function main() {
     );
   });
 
-  await test('recognizes only complete PDF output', () => {
+  await record('recognizes only complete PDF output', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-pdf-complete-'));
     const file = path.join(tmp, 'artifact.pdf');
     fs.writeFileSync(file, '%PDF-1.4\npartial');
@@ -102,7 +104,7 @@ async function main() {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  await test('validates PDF metadata from the opened file handle', () => {
+  await record('validates PDF metadata from the opened file handle', () => {
     const content = Buffer.from('%PDF-1.4\nlocal plan\n%%EOF\n');
     const fsImpl = {
       openSync(file, flags) {
@@ -124,7 +126,7 @@ async function main() {
     assert.strictEqual(isCompletePdf('/private/export.pdf', fsImpl), true);
   });
 
-  await test('renders, terminates its private browser, and removes temporary state', async () => {
+  await record('renders, isolates network access, terminates its browser, and removes temporary state', async () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-pdf-test-'));
     let spawned = null;
     let child = null;
@@ -151,6 +153,11 @@ async function main() {
     assert.strictEqual(spawned.command, '/opt/test/chrome');
     assert.strictEqual(spawned.options.shell, false);
     assert.ok(spawned.args.includes('--headless=new'));
+    assert.ok(spawned.args.includes('--disable-background-networking'));
+    assert.ok(spawned.args.includes('--disable-quic'));
+    assert.ok(spawned.args.some(arg => /^--proxy-server=http:\/\/127\.0\.0\.1:\d+$/.test(arg)));
+    assert.ok(spawned.args.includes('--proxy-bypass-list=<-loopback>;http://localhost:4517'));
+    assert.ok(spawned.args.includes('--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost'));
     assert.ok(spawned.args.includes('http://localhost:4517/artifact/abc123/?pdf=1'));
     assert.strictEqual(child.signalCode, 'SIGTERM');
     assert.deepStrictEqual(fs.readdirSync(tempRoot), []);

@@ -82,7 +82,7 @@ after 30 min, `ECC_PLAN_CANVAS_IDLE_MS`). Feedback is deliver-and-drain: queued 
 handed to exactly one `await` call and persisted to disk until then, so nothing is lost if
 the poll is interrupted.
 
-- `GET /health` — `{ok, app, version, protocolVersion, runtimeId}`; the CLI reuses a detached server only when its package, protocol, and Canvas-module fingerprint match, preventing an older same-version worktree from serving stale browser code
+- `GET /health` — `{ok, app, version, protocolVersion, runtimeId}`; the CLI reuses a detached server only when its package, protocol, and Canvas-module fingerprint match, preventing an older same-version worktree from serving stale browser code. A per-user, port-scoped startup lock serializes compatibility checks and replacement so concurrent opens reuse the winning server instead of racing two detached launches.
 - `GET /` — session list (ECC chrome)
 - `POST /api/sessions` `{file, reopen?}` — open/resume; `409 user-ended` unless `reopen`
 - `GET /canvas/<key>` — editor chrome; `GET /artifact/<key>/` — rendered artifact
@@ -127,7 +127,11 @@ unavailable, and can be repointed at a local mirror via
 
 PDF export also stays local. The server launches an installed Chrome, Chromium, or Edge
 executable with a new temporary profile, restricts the print target to the loopback Canvas
-origin, waits for a complete `%PDF` document, terminates that private renderer, and removes
-its temporary profile. Set `ECC_PLAN_CANVAS_CHROME_PATH` when auto-discovery cannot find the
-browser. The export endpoint returns an actionable error instead of uploading the plan or
-silently falling back to a remote service.
+origin, applies an export-only CSP that disables scripts and outbound resource classes, and
+routes every non-origin browser request into a local deny proxy. It waits for a complete
+`%PDF` document, terminates that private renderer, closes the deny proxy, and removes its
+temporary profile. One renderer is admitted at a time; overlapping requests receive HTTP 429
+with `Retry-After: 1` instead of launching unbounded browser processes. Set
+`ECC_PLAN_CANVAS_CHROME_PATH` when auto-discovery cannot find the browser. The export endpoint
+returns an actionable error instead of uploading the plan or silently falling back to a
+remote service.

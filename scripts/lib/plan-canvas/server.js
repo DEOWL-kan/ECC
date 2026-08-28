@@ -31,6 +31,7 @@ const DEFAULT_PORT = 4517;
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_PDF_SNAPSHOT_BYTES = 5 * 1024 * 1024;
 // How long the "agent is thinking" indicator survives without the agent
 // checking back in, before presence decays to the honest queued/waiting.
 const DEFAULT_THINKING_STALE_MS = 90 * 1000;
@@ -38,6 +39,19 @@ const DEFAULT_THINKING_STALE_MS = 90 * 1000;
 const DEFAULT_TYPING_EXPIRY_MS = 30 * 1000;
 const PLAN_CANVAS_PROTOCOL_VERSION = 4;
 const TYPING_STATES = new Set(['thinking', 'typing', 'idle']);
+const PDF_EXPORT_CSP = [
+  "default-src 'none'",
+  "base-uri 'none'",
+  "connect-src 'none'",
+  "font-src 'self' data:",
+  "form-action 'none'",
+  "frame-src 'none'",
+  "img-src 'self' data:",
+  "media-src 'self' data:",
+  "object-src 'none'",
+  "script-src 'none'",
+  "style-src 'self' 'unsafe-inline'"
+].join('; ');
 
 // Package versions do not distinguish two worktrees on the same release.
 // Fingerprint every module loaded into the detached server so a current CLI
@@ -96,13 +110,13 @@ function resolveIdleTimeoutMs(env = process.env) {
   return Number.isInteger(value) && value > 0 ? value : DEFAULT_IDLE_TIMEOUT_MS;
 }
 
-function readJsonBody(req) {
+function readJsonBody(req, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', chunk => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBytes) {
         reject(new Error('body too large'));
         req.destroy();
         return;
@@ -130,8 +144,9 @@ function sendJson(res, statusCode, payload) {
 function sendHtml(res, statusCode, html, { csp = true } = {}) {
   const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
   if (csp) {
-    headers['content-security-policy'] =
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'";
+    headers['content-security-policy'] = typeof csp === 'string'
+      ? csp
+      : "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'";
   }
   res.writeHead(statusCode, headers);
   res.end(html);
@@ -175,6 +190,8 @@ function createPlanCanvasServer({
   const typingKeys = new Map(); // key -> ms timestamp the agent signalled composing
   let idleTimer = null;
   let closed = false;
+  let pdfExportActive = false;
+  let pdfSnapshot = null;
 
   // --- presence ---------------------------------------------------------
 
@@ -391,10 +408,25 @@ function createPlanCanvasServer({
     }
 
     const pdfMatch = pathname.match(/^\/api\/session\/([a-f0-9]{12})\/pdf$/);
-    if (pdfMatch && req.method === 'GET') {
+    if (pdfMatch && (req.method === 'GET' || req.method === 'POST')) {
       const session = store.get(pdfMatch[1]);
       if (!session) return sendJson(res, 404, { error: 'unknown session' });
+      if (pdfExportActive) {
+        res.setHeader('retry-after', '1');
+        return sendJson(res, 429, {
+          error: 'another PDF export is already in progress',
+          code: 'PDF_EXPORT_BUSY'
+        });
+      }
+      pdfExportActive = true;
       try {
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req, MAX_PDF_SNAPSHOT_BYTES);
+          if (typeof body.html !== 'string' || !body.html.trim()) {
+            return sendJson(res, 400, { error: 'html snapshot is required' });
+          }
+          pdfSnapshot = { key: session.key, html: body.html };
+        }
         const pdf = await pdfExporter({
           url: `http://${req.headers.host}/artifact/${session.key}/?pdf=1`,
           artifactFile: session.file
@@ -403,6 +435,9 @@ function createPlanCanvasServer({
       } catch (error) {
         const statusCode = error.code === 'PDF_BROWSER_NOT_FOUND' ? 503 : 500;
         return sendJson(res, statusCode, { error: error.message, code: error.code || 'PDF_EXPORT_FAILED' });
+      } finally {
+        pdfSnapshot = null;
+        pdfExportActive = false;
       }
     }
 
@@ -474,11 +509,14 @@ function createPlanCanvasServer({
     res.end();
   }
 
-  function serveArtifact(res, key, assetPath) {
+  function serveArtifact(res, key, assetPath, { pdfExport = false } = {}) {
     const session = store.get(key);
     if (!session) return sendHtml(res, 404, '<h1>Unknown session</h1>');
 
     if (!assetPath) {
+      if (pdfExport && pdfSnapshot && pdfSnapshot.key === key) {
+        return sendHtml(res, 200, pdfSnapshot.html, { csp: PDF_EXPORT_CSP });
+      }
       let content;
       try {
         content = fs.readFileSync(session.file, 'utf8');
@@ -491,13 +529,13 @@ function createPlanCanvasServer({
           title: path.basename(session.file),
           sdkSrc: '/sdk.js'
         });
-        return sendHtml(res, 200, html, { csp: false });
+        return sendHtml(res, 200, html, { csp: pdfExport ? PDF_EXPORT_CSP : false });
       }
       const sdkTag = '<script src="/sdk.js"></script>';
       const injected = content.includes('</body>')
         ? content.replace('</body>', `${sdkTag}\n</body>`)
         : `${content}\n${sdkTag}`;
-      return sendHtml(res, 200, injected, { csp: false });
+      return sendHtml(res, 200, injected, { csp: pdfExport ? PDF_EXPORT_CSP : false });
     }
 
     // Sibling assets resolve relative to the artifact's directory and must
@@ -574,7 +612,9 @@ function createPlanCanvasServer({
         const artifactMatch = pathname.match(/^\/artifact\/([a-f0-9]{12})\/(.*)$/);
         if (req.method === 'GET' && artifactMatch) {
           const assetPath = decodeURIComponent(artifactMatch[2]);
-          return serveArtifact(res, artifactMatch[1], assetPath || null);
+          return serveArtifact(res, artifactMatch[1], assetPath || null, {
+            pdfExport: url.searchParams.get('pdf') === '1'
+          });
         }
         if (pathname.startsWith('/api/')) {
           return handleApi(req, res, url);
