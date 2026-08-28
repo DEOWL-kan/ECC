@@ -179,19 +179,20 @@ async function withServerStartLock(port, task, {
   const lockPort = validatePort(port);
   const startedAt = Date.now();
   let socket = null;
+  let socketError = null;
 
   while (true) {
     try {
       socket = await new Promise((resolve, reject) => {
         const candidate = dgramImpl.createSocket('udp4');
         const onError = error => {
-          candidate.close();
+          try { candidate.close(); } catch { /* failed bind has no open handle */ }
           reject(error);
         };
         candidate.once('error', onError);
         candidate.bind(lockPort, DEFAULT_HOST, () => {
           candidate.removeListener('error', onError);
-          candidate.on('error', () => {});
+          candidate.on('error', error => { socketError = error; });
           candidate.unref();
           resolve(candidate);
         });
@@ -206,11 +207,23 @@ async function withServerStartLock(port, task, {
     }
   }
 
+  let result;
   try {
-    return await task();
+    result = await task();
   } finally {
-    if (socket) socket.close();
+    if (socket) {
+      await new Promise(resolve => {
+        try { socket.close(resolve); } catch { resolve(); }
+      });
+    }
   }
+  if (socketError) {
+    const error = new Error(`Plan Canvas startup lock failed on port ${port}: ${socketError.message}`);
+    error.code = 'PLAN_CANVAS_START_LOCK_FAILED';
+    error.cause = socketError;
+    throw error;
+  }
+  return result;
 }
 
 function serverIsCompatible(health) {

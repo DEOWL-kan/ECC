@@ -433,8 +433,18 @@ function createPlanCanvasServer({
         });
         return sendPdf(res, pdf);
       } catch (error) {
-        const statusCode = error.code === 'PDF_BROWSER_NOT_FOUND' ? 503 : 500;
-        return sendJson(res, statusCode, { error: error.message, code: error.code || 'PDF_EXPORT_FAILED' });
+        const code = error.code || 'PDF_EXPORT_FAILED';
+        log(`[plan-canvas] PDF export failed (${code}): ${error.stack || error.message}`);
+        if (code === 'PDF_BROWSER_NOT_FOUND') {
+          return sendJson(res, 503, {
+            error: 'PDF export requires Google Chrome, Chromium, or Microsoft Edge; configure ECC_PLAN_CANVAS_CHROME_PATH if auto-discovery cannot find it',
+            code
+          });
+        }
+        return sendJson(res, 500, {
+          error: 'PDF export failed; check the Plan Canvas server log for details',
+          code: 'PDF_EXPORT_FAILED'
+        });
       } finally {
         pdfSnapshot = null;
         pdfExportActive = false;

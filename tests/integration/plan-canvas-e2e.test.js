@@ -17,6 +17,7 @@
  */
 
 const assert = require('assert');
+const { EventEmitter } = require('events');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -166,6 +167,21 @@ async function main() {
       assert.strictEqual(
         await withServerStartLock(lockPort, async () => 'recovered', { timeoutMs: 2000 }),
         'recovered'
+      );
+    });
+
+    await test('port-scoped startup lock propagates socket failures', async () => {
+      class FailingLockSocket extends EventEmitter {
+        bind(_port, _host, callback) { setImmediate(callback); }
+        unref() {}
+        close(callback) { if (callback) setImmediate(callback); }
+      }
+      const socket = new FailingLockSocket();
+      await assert.rejects(
+        withServerStartLock(port + 4, async () => {
+          socket.emit('error', new Error('simulated UDP failure'));
+        }, { dgramImpl: { createSocket: () => socket }, timeoutMs: 2000 }),
+        error => error.code === 'PLAN_CANVAS_START_LOCK_FAILED' && error.message.includes('simulated UDP failure')
       );
     });
 

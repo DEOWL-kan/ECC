@@ -104,6 +104,8 @@ async function main() {
   const pdfRequests = [];
   let holdPdfExport = false;
   let releasePdfExport = null;
+  let pdfFailure = null;
+  const serverLogs = [];
   let idleFired = false;
   const canvas = createPlanCanvasServer({
     store,
@@ -112,9 +114,11 @@ async function main() {
     idleTimeoutMs: 0,
     pdfExporter: async options => {
       pdfRequests.push(options);
+      if (pdfFailure) throw pdfFailure;
       if (holdPdfExport) await new Promise(resolve => { releasePdfExport = resolve; });
       return { buffer: Buffer.from('%PDF-1.4\n%%EOF\n'), filename: 'demo.pdf' };
     },
+    log: line => serverLogs.push(line),
     onIdleShutdown: () => {
       idleFired = true;
     }
@@ -260,22 +264,53 @@ async function main() {
     holdPdfExport = true;
     const snapshot = '<!doctype html><html><body><h1>Already rendered diagram</h1><svg><text>Local SVG</text></svg><script>fetch("https://example.invalid")</script></body></html>';
     const first = request(port, 'POST', `/api/session/${key}/pdf`, { body: { html: snapshot } });
-    await waitFor(() => typeof releasePdfExport === 'function');
-    const printable = await request(port, 'GET', `/artifact/${key}/?pdf=1`);
-    assert.ok(printable.body.includes('Already rendered diagram'));
-    assert.ok(printable.body.includes('Local SVG'));
-    assert.ok(printable.headers['content-security-policy'].includes("script-src 'none'"));
-    const overloaded = await request(port, 'GET', `/api/session/${key}/pdf`);
-    assert.strictEqual(overloaded.statusCode, 429);
-    assert.strictEqual(overloaded.headers['retry-after'], '1');
-    assert.deepStrictEqual(jsonBody(overloaded), {
-      error: 'another PDF export is already in progress',
-      code: 'PDF_EXPORT_BUSY'
-    });
-    releasePdfExport();
+    try {
+      await waitFor(() => typeof releasePdfExport === 'function');
+      const printable = await request(port, 'GET', `/artifact/${key}/?pdf=1`);
+      assert.ok(printable.body.includes('Already rendered diagram'));
+      assert.ok(printable.body.includes('Local SVG'));
+      assert.ok(printable.headers['content-security-policy'].includes("script-src 'none'"));
+      const overloaded = await request(port, 'GET', `/api/session/${key}/pdf`);
+      assert.strictEqual(overloaded.statusCode, 429);
+      assert.strictEqual(overloaded.headers['retry-after'], '1');
+      assert.deepStrictEqual(jsonBody(overloaded), {
+        error: 'another PDF export is already in progress',
+        code: 'PDF_EXPORT_BUSY'
+      });
+    } finally {
+      const release = releasePdfExport;
+      holdPdfExport = false;
+      releasePdfExport = null;
+      if (release) release();
+    }
     assert.strictEqual((await first).statusCode, 200);
-    holdPdfExport = false;
-    releasePdfExport = null;
+  })) passed++; else failed++;
+
+  if (await test('PDF failures log diagnostics without disclosing local paths', async () => {
+    try {
+      const rendererError = new Error('Chromium failed at /Users/private/browser-profile');
+      rendererError.code = 'PDF_EXPORT_FAILED';
+      pdfFailure = rendererError;
+      const failed = await request(port, 'GET', `/api/session/${key}/pdf`);
+      assert.strictEqual(failed.statusCode, 500);
+      assert.deepStrictEqual(jsonBody(failed), {
+        error: 'PDF export failed; check the Plan Canvas server log for details',
+        code: 'PDF_EXPORT_FAILED'
+      });
+      assert.ok(!failed.body.includes('/Users/private'));
+      assert.ok(serverLogs.some(line => line.includes('/Users/private/browser-profile')));
+
+      const browserError = new Error('missing override /Users/private/Chrome');
+      browserError.code = 'PDF_BROWSER_NOT_FOUND';
+      pdfFailure = browserError;
+      const missing = await request(port, 'GET', `/api/session/${key}/pdf`);
+      assert.strictEqual(missing.statusCode, 503);
+      assert.strictEqual(jsonBody(missing).code, 'PDF_BROWSER_NOT_FOUND');
+      assert.ok(jsonBody(missing).error.includes('ECC_PLAN_CANVAS_CHROME_PATH'));
+      assert.ok(!missing.body.includes('/Users/private'));
+    } finally {
+      pdfFailure = null;
+    }
   })) passed++; else failed++;
 
   if (await test('browser client uses finite polling instead of one permanent connection per canvas', async () => {
