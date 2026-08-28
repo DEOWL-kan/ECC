@@ -18,8 +18,8 @@
  */
 
 const fs = require('fs');
+const dgram = require('dgram');
 const http = require('http');
-const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -172,67 +172,33 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function serverStartLockPath(port, lockDir = os.tmpdir()) {
-  const userId = typeof process.getuid === 'function' ? process.getuid() : 'user';
-  return path.join(lockDir, `ecc-plan-canvas-${userId}-${validatePort(port)}.lock`);
-}
-
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
-}
-
-function readServerStartLock(lockPath) {
-  let fd;
-  try {
-    fd = fs.openSync(lockPath, 'r');
-    const stat = fs.fstatSync(fd);
-    let owner = null;
-    try { owner = JSON.parse(fs.readFileSync(fd, 'utf8')); } catch { /* incomplete lock owner */ }
-    return { mtimeMs: stat.mtimeMs, owner };
-  } finally {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd); } catch { /* best-effort lock inspection */ }
-    }
-  }
-}
-
-function removeStaleServerStartLock(lockPath, staleAfterMs = 60 * 1000) {
-  try {
-    const { mtimeMs, owner } = readServerStartLock(lockPath);
-    const oldEnough = Date.now() - mtimeMs > staleAfterMs;
-    if (!oldEnough && (!owner || processIsAlive(owner.pid))) return false;
-    fs.rmSync(lockPath, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function withServerStartLock(port, task, {
-  lockDir = os.tmpdir(),
-  timeoutMs = 15 * 1000
+  timeoutMs = 15 * 1000,
+  dgramImpl = dgram
 } = {}) {
-  fs.mkdirSync(lockDir, { recursive: true });
-  const lockPath = serverStartLockPath(port, lockDir);
-  const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const lockPort = validatePort(port);
   const startedAt = Date.now();
+  let socket = null;
 
   while (true) {
     try {
-      fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() }), {
-        flag: 'wx',
-        mode: 0o600
+      socket = await new Promise((resolve, reject) => {
+        const candidate = dgramImpl.createSocket('udp4');
+        const onError = error => {
+          candidate.close();
+          reject(error);
+        };
+        candidate.once('error', onError);
+        candidate.bind(lockPort, DEFAULT_HOST, () => {
+          candidate.removeListener('error', onError);
+          candidate.on('error', () => {});
+          candidate.unref();
+          resolve(candidate);
+        });
       });
       break;
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      if (removeStaleServerStartLock(lockPath)) continue;
+      if (error.code !== 'EADDRINUSE') throw error;
       if (Date.now() - startedAt >= timeoutMs) {
         throw new Error(`timed out waiting for Plan Canvas startup lock on port ${port}`);
       }
@@ -243,12 +209,7 @@ async function withServerStartLock(port, task, {
   try {
     return await task();
   } finally {
-    try {
-      const owner = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-      if (owner.token === token) fs.rmSync(lockPath, { force: true });
-    } catch {
-      // A stale-lock recovery may already have removed it.
-    }
+    if (socket) socket.close();
   }
 }
 

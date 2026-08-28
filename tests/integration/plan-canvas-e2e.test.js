@@ -152,22 +152,21 @@ async function main() {
         await new Promise(resolve => setTimeout(resolve, 40));
         active -= 1;
         return label;
-      }, { lockDir: tmp, timeoutMs: 2000 });
+      }, { timeoutMs: 2000 });
       assert.deepStrictEqual(await Promise.all([runLocked('first'), runLocked('second')]), ['first', 'second']);
       assert.strictEqual(maximumActive, 1);
-      assert.ok(!fs.readdirSync(tmp).some(name => name.endsWith('.lock')));
     });
 
-    await test('port-scoped startup lock recovers a dead owner', async () => {
+    await test('port-scoped startup lock releases after a failed owner', async () => {
       const lockPort = port + 3;
-      const userId = typeof process.getuid === 'function' ? process.getuid() : 'user';
-      const lockPath = path.join(tmp, `ecc-plan-canvas-${userId}-${lockPort}.lock`);
-      fs.writeFileSync(lockPath, JSON.stringify({ pid: 2147483647, token: 'dead-owner' }));
+      await assert.rejects(
+        withServerStartLock(lockPort, async () => { throw new Error('owner failed'); }, { timeoutMs: 2000 }),
+        /owner failed/
+      );
       assert.strictEqual(
-        await withServerStartLock(lockPort, async () => 'recovered', { lockDir: tmp, timeoutMs: 2000 }),
+        await withServerStartLock(lockPort, async () => 'recovered', { timeoutMs: 2000 }),
         'recovered'
       );
-      assert.ok(!fs.existsSync(lockPath));
     });
 
     await test('concurrent opens serialize replacement of a same-version legacy server', async () => {

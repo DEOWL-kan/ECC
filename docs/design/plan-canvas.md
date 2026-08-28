@@ -82,7 +82,7 @@ after 30 min, `ECC_PLAN_CANVAS_IDLE_MS`). Feedback is deliver-and-drain: queued 
 handed to exactly one `await` call and persisted to disk until then, so nothing is lost if
 the poll is interrupted.
 
-- `GET /health` — `{ok, app, version, protocolVersion, runtimeId}`; the CLI reuses a detached server only when its package, protocol, and Canvas-module fingerprint match, preventing an older same-version worktree from serving stale browser code. A per-user, port-scoped startup lock serializes compatibility checks and replacement so concurrent opens reuse the winning server instead of racing two detached launches.
+- `GET /health` — `{ok, app, version, protocolVersion, runtimeId}`; the CLI reuses a detached server only when its package, protocol, and Canvas-module fingerprint match, preventing an older same-version worktree from serving stale browser code. An OS-managed, port-scoped startup lock serializes compatibility checks and replacement so concurrent opens reuse the winning server instead of racing two detached launches. The lock is released automatically when its process exits.
 - `GET /` — session list (ECC chrome)
 - `POST /api/sessions` `{file, reopen?}` — open/resume; `409 user-ended` unless `reopen`
 - `GET /canvas/<key>` — editor chrome; `GET /artifact/<key>/` — rendered artifact
