@@ -25,8 +25,8 @@ artifact as a real PDF file without sending the plan to an external converter.
 - RED: the focused server suite produced 30 passes and 2 failures because the
   Canvas had no Download PDF control or PDF endpoint.
 - GREEN: renderer unit tests pass 7/7, Plan Canvas server tests pass 34/34,
-  and the end-to-end review workflow passes 11/11.
-- FULL SUITE: the final review-hardened implementation passes all 4,007
+  and the end-to-end review workflow passes 12/12.
+- FULL SUITE: the final review-hardened implementation passes all 4,008
   discovered tests; hosted security reruns are recorded on PR #2894.
 - COVERAGE: `npm run coverage` passes 4,003/4,003 with 88.97% statements,
   80.58% branches, 94.22% functions, and 88.97% lines. The Plan Canvas

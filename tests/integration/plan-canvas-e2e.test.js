@@ -158,6 +158,18 @@ async function main() {
       assert.ok(!fs.readdirSync(tmp).some(name => name.endsWith('.lock')));
     });
 
+    await test('port-scoped startup lock recovers a dead owner', async () => {
+      const lockPort = port + 3;
+      const userId = typeof process.getuid === 'function' ? process.getuid() : 'user';
+      const lockPath = path.join(tmp, `ecc-plan-canvas-${userId}-${lockPort}.lock`);
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: 2147483647, token: 'dead-owner' }));
+      assert.strictEqual(
+        await withServerStartLock(lockPort, async () => 'recovered', { lockDir: tmp, timeoutMs: 2000 }),
+        'recovered'
+      );
+      assert.ok(!fs.existsSync(lockPath));
+    });
+
     await test('concurrent opens serialize replacement of a same-version legacy server', async () => {
       const legacyPort = port + 1;
       const legacyStateDir = path.join(tmp, 'legacy-state');

@@ -187,12 +187,25 @@ function processIsAlive(pid) {
   }
 }
 
+function readServerStartLock(lockPath) {
+  let fd;
+  try {
+    fd = fs.openSync(lockPath, 'r');
+    const stat = fs.fstatSync(fd);
+    let owner = null;
+    try { owner = JSON.parse(fs.readFileSync(fd, 'utf8')); } catch { /* incomplete lock owner */ }
+    return { mtimeMs: stat.mtimeMs, owner };
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort lock inspection */ }
+    }
+  }
+}
+
 function removeStaleServerStartLock(lockPath, staleAfterMs = 60 * 1000) {
   try {
-    const stat = fs.statSync(lockPath);
-    let owner = null;
-    try { owner = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch { /* incomplete lock owner */ }
-    const oldEnough = Date.now() - stat.mtimeMs > staleAfterMs;
+    const { mtimeMs, owner } = readServerStartLock(lockPath);
+    const oldEnough = Date.now() - mtimeMs > staleAfterMs;
     if (!oldEnough && (!owner || processIsAlive(owner.pid))) return false;
     fs.rmSync(lockPath, { force: true });
     return true;
