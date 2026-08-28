@@ -17,6 +17,7 @@
  */
 
 const assert = require('assert');
+const dgram = require('dgram');
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const http = require('http');
@@ -170,6 +171,23 @@ async function main() {
       );
     });
 
+    await test('unrelated UDP traffic on the Canvas port does not block startup', async () => {
+      const servicePort = port + 4;
+      const unrelatedSocket = dgram.createSocket('udp4');
+      await new Promise((resolve, reject) => {
+        unrelatedSocket.once('error', reject);
+        unrelatedSocket.bind(servicePort, '127.0.0.1', resolve);
+      });
+      try {
+        assert.strictEqual(
+          await withServerStartLock(servicePort, async () => 'started', { timeoutMs: 2000 }),
+          'started'
+        );
+      } finally {
+        unrelatedSocket.close();
+      }
+    });
+
     await test('port-scoped startup lock propagates socket failures', async () => {
       class FailingLockSocket extends EventEmitter {
         bind(_port, _host, callback) { setImmediate(callback); }
@@ -178,7 +196,7 @@ async function main() {
       }
       const socket = new FailingLockSocket();
       await assert.rejects(
-        withServerStartLock(port + 4, async () => {
+        withServerStartLock(port + 5, async () => {
           socket.emit('error', new Error('simulated UDP failure'));
         }, { dgramImpl: { createSocket: () => socket }, timeoutMs: 2000 }),
         error => error.code === 'PLAN_CANVAS_START_LOCK_FAILED' && error.message.includes('simulated UDP failure')

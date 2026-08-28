@@ -172,11 +172,21 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function serverStartLockPort(port) {
+  const servicePort = validatePort(port);
+  // Keep the kernel-managed mutex independent of the TCP service endpoint.
+  // The rotation is one-to-one for ordinary non-privileged service ports, so
+  // separate Canvas ports do not contend with one another.
+  if (servicePort < 1024) return 49152 + servicePort;
+  const nonPrivilegedPortCount = 65535 - 1024 + 1;
+  return 1024 + ((servicePort - 1024 + Math.floor(nonPrivilegedPortCount / 2)) % nonPrivilegedPortCount);
+}
+
 async function withServerStartLock(port, task, {
   timeoutMs = 15 * 1000,
   dgramImpl = dgram
 } = {}) {
-  const lockPort = validatePort(port);
+  const lockPort = serverStartLockPort(port);
   const startedAt = Date.now();
   let socket = null;
   let socketError = null;
