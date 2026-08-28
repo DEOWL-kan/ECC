@@ -18,7 +18,6 @@
 
 const assert = require('assert');
 const dgram = require('dgram');
-const { EventEmitter } = require('events');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -146,6 +145,7 @@ async function main() {
 
   try {
     await test('port-scoped startup lock serializes server replacement callers', async () => {
+      const lockDir = path.join(tmp, 'startup-locks');
       let active = 0;
       let maximumActive = 0;
       const runLocked = label => withServerStartLock(port + 2, async () => {
@@ -154,21 +154,27 @@ async function main() {
         await new Promise(resolve => setTimeout(resolve, 40));
         active -= 1;
         return label;
-      }, { timeoutMs: 2000 });
+      }, { lockDir, timeoutMs: 2000 });
       assert.deepStrictEqual(await Promise.all([runLocked('first'), runLocked('second')]), ['first', 'second']);
       assert.strictEqual(maximumActive, 1);
     });
 
-    await test('port-scoped startup lock releases after a failed owner', async () => {
+    await test('port-scoped startup lock recovers dead tickets and failed owners', async () => {
       const lockPort = port + 3;
+      const lockDir = path.join(tmp, 'startup-locks');
+      fs.mkdirSync(lockDir, { recursive: true });
+      const deadTicket = path.join(lockDir, `ecc-plan-canvas-${lockPort}-dead-owner.ticket`);
+      fs.writeFileSync(deadTicket, JSON.stringify({ pid: 2147483647, token: 'dead-owner', number: 1 }));
       await assert.rejects(
-        withServerStartLock(lockPort, async () => { throw new Error('owner failed'); }, { timeoutMs: 2000 }),
+        withServerStartLock(lockPort, async () => { throw new Error('owner failed'); }, { lockDir, timeoutMs: 2000 }),
         /owner failed/
       );
       assert.strictEqual(
-        await withServerStartLock(lockPort, async () => 'recovered', { timeoutMs: 2000 }),
+        await withServerStartLock(lockPort, async () => 'recovered', { lockDir, timeoutMs: 2000 }),
         'recovered'
       );
+      assert.ok(!fs.existsSync(deadTicket));
+      assert.ok(!fs.readdirSync(lockDir).some(name => name.startsWith(`ecc-plan-canvas-${lockPort}-`)));
     });
 
     await test('unrelated UDP traffic on the Canvas port does not block startup', async () => {
@@ -186,21 +192,6 @@ async function main() {
       } finally {
         unrelatedSocket.close();
       }
-    });
-
-    await test('port-scoped startup lock propagates socket failures', async () => {
-      class FailingLockSocket extends EventEmitter {
-        bind(_port, _host, callback) { setImmediate(callback); }
-        unref() {}
-        close(callback) { if (callback) setImmediate(callback); }
-      }
-      const socket = new FailingLockSocket();
-      await assert.rejects(
-        withServerStartLock(port + 5, async () => {
-          socket.emit('error', new Error('simulated UDP failure'));
-        }, { dgramImpl: { createSocket: () => socket }, timeoutMs: 2000 }),
-        error => error.code === 'PLAN_CANVAS_START_LOCK_FAILED' && error.message.includes('simulated UDP failure')
-      );
     });
 
     await test('concurrent opens serialize replacement of a same-version legacy server', async () => {

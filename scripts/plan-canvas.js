@@ -18,8 +18,8 @@
  */
 
 const fs = require('fs');
-const dgram = require('dgram');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -172,68 +172,102 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function serverStartLockPort(port) {
-  const servicePort = validatePort(port);
-  // Keep the kernel-managed mutex independent of the TCP service endpoint.
-  // The rotation is one-to-one for ordinary non-privileged service ports, so
-  // separate Canvas ports do not contend with one another.
-  if (servicePort < 1024) return 49152 + servicePort;
-  const nonPrivilegedPortCount = 65535 - 1024 + 1;
-  return 1024 + ((servicePort - 1024 + Math.floor(nonPrivilegedPortCount / 2)) % nonPrivilegedPortCount);
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+function readServerStartTicket(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const stat = fs.fstatSync(fd);
+    try {
+      const value = JSON.parse(fs.readFileSync(fd, 'utf8'));
+      return { ...value, mtimeMs: stat.mtimeMs, malformed: false };
+    } catch {
+      return { mtimeMs: stat.mtimeMs, malformed: true };
+    }
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort ticket inspection */ }
+    }
+  }
+}
+
+function listServerStartTickets(lockDir, port, ownToken, staleAfterMs = 60 * 1000) {
+  const prefix = `ecc-plan-canvas-${validatePort(port)}-`;
+  const entries = [];
+  for (const name of fs.readdirSync(lockDir)) {
+    if (!name.startsWith(prefix) || (!name.endsWith('.choosing') && !name.endsWith('.ticket'))) continue;
+    const file = path.join(lockDir, name);
+    let value = null;
+    try {
+      value = readServerStartTicket(file);
+    } catch {
+      // The owner may already have removed its unique ticket.
+      continue;
+    }
+    if (value.malformed) {
+      if (Date.now() - value.mtimeMs > staleAfterMs) {
+        try { fs.rmSync(file, { force: true }); } catch { /* already removed */ }
+      }
+      continue;
+    }
+    const stale = value.token !== ownToken && !processIsAlive(value.pid);
+    if (stale) {
+      // Ticket names contain a never-reused random owner token, so removing a
+      // dead owner's exact path cannot delete a later caller's live ticket.
+      try { fs.rmSync(file, { force: true }); } catch { /* already removed */ }
+      continue;
+    }
+    entries.push({ ...value, file, choosing: name.endsWith('.choosing') });
+  }
+  return entries;
 }
 
 async function withServerStartLock(port, task, {
   timeoutMs = 15 * 1000,
-  dgramImpl = dgram
+  lockDir = path.join(os.homedir(), '.claude', 'plan-canvas', 'locks')
 } = {}) {
-  const lockPort = serverStartLockPort(port);
+  const lockPort = validatePort(port);
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const prefix = `ecc-plan-canvas-${lockPort}-${token}`;
+  const choosingFile = path.join(lockDir, `${prefix}.choosing`);
+  const ticketFile = path.join(lockDir, `${prefix}.ticket`);
   const startedAt = Date.now();
-  let socket = null;
-  let socketError = null;
+  fs.mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(choosingFile, JSON.stringify({ pid: process.pid, token }), { flag: 'wx', mode: 0o600 });
 
-  while (true) {
-    try {
-      socket = await new Promise((resolve, reject) => {
-        const candidate = dgramImpl.createSocket('udp4');
-        const onError = error => {
-          try { candidate.close(); } catch { /* failed bind has no open handle */ }
-          reject(error);
-        };
-        candidate.once('error', onError);
-        candidate.bind(lockPort, DEFAULT_HOST, () => {
-          candidate.removeListener('error', onError);
-          candidate.on('error', error => { socketError = error; });
-          candidate.unref();
-          resolve(candidate);
-        });
-      });
-      break;
-    } catch (error) {
-      if (error.code !== 'EADDRINUSE') throw error;
+  try {
+    const existing = listServerStartTickets(lockDir, lockPort, token)
+      .filter(entry => !entry.choosing && Number.isInteger(entry.number));
+    const number = existing.reduce((maximum, entry) => Math.max(maximum, entry.number), 0) + 1;
+    fs.writeFileSync(ticketFile, JSON.stringify({ pid: process.pid, token, number }), { flag: 'wx', mode: 0o600 });
+    fs.rmSync(choosingFile, { force: true });
+
+    while (true) {
+      const entries = listServerStartTickets(lockDir, lockPort, token);
+      const anotherOwnerIsChoosing = entries.some(entry => entry.choosing && entry.token !== token);
+      const tickets = entries
+        .filter(entry => !entry.choosing && Number.isInteger(entry.number))
+        .sort((left, right) => left.number - right.number || left.token.localeCompare(right.token));
+      if (!anotherOwnerIsChoosing && tickets[0] && tickets[0].token === token) break;
       if (Date.now() - startedAt >= timeoutMs) {
         throw new Error(`timed out waiting for Plan Canvas startup lock on port ${port}`);
       }
       await sleep(50);
     }
-  }
-
-  let result;
-  try {
-    result = await task();
+    return await task();
   } finally {
-    if (socket) {
-      await new Promise(resolve => {
-        try { socket.close(resolve); } catch { resolve(); }
-      });
-    }
+    fs.rmSync(choosingFile, { force: true });
+    fs.rmSync(ticketFile, { force: true });
   }
-  if (socketError) {
-    const error = new Error(`Plan Canvas startup lock failed on port ${port}: ${socketError.message}`);
-    error.code = 'PLAN_CANVAS_START_LOCK_FAILED';
-    error.cause = socketError;
-    throw error;
-  }
-  return result;
 }
 
 function serverIsCompatible(health) {
