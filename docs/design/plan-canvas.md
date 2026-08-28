@@ -41,7 +41,7 @@ A loopback-only web editor for plan artifacts (and any local HTML artifact):
 | Server | `scripts/lib/plan-canvas/server.js` | control-pane loopback server, host-header + Origin allowlist (DNS-rebinding guard) |
 | Editor chrome | `scripts/lib/plan-canvas/ui.js` | `scripts/lib/control-pane/ui.js`, tokens from `scripts/dashboard-web.js` |
 | Markdown plan renderer | `scripts/lib/plan-canvas/markdown.js` | zero new deps; renders the `commands/plan.md` artifact schema (tables, tasks, code fences, Mermaid blocks) |
-| Mermaid diagrams | `scripts/lib/plan-canvas/ui.js` | ` ```mermaid ` blocks render in the browser, themed to ECC; pinned CDN with offline fallback (`ECC_PLAN_CANVAS_MERMAID_URL` for a local mirror) |
+| Mermaid diagrams | `scripts/lib/plan-canvas/ui.js` | ` ```mermaid ` blocks render in the browser after page load, themed to ECC; pinned CDN with non-blocking fallback (`ECC_PLAN_CANVAS_MERMAID_URL` for a local mirror) |
 | Session state | `scripts/lib/plan-canvas/sessions.js` | file-path-keyed sessions, state under `~/.claude/plan-canvas/` (`ECC_PLAN_CANVAS_STATE_DIR` override) |
 | Skill | `skills/plan-canvas/SKILL.md` | skills-first surface; teaches the open → await → reply loop; defers visual guidance to `frontend-design-direction`, `artifact-design`, `dataviz` |
 | Command shim | `commands/plan-canvas.md` | legacy parity surface, points at the skill |
@@ -81,7 +81,7 @@ after 30 min, `ECC_PLAN_CANVAS_IDLE_MS`). Feedback is deliver-and-drain: queued 
 handed to exactly one `await` call and persisted to disk until then, so nothing is lost if
 the poll is interrupted.
 
-- `GET /health` — `{ok, app: "ecc-plan-canvas", version}` (CLI/server version handshake)
+- `GET /health` — `{ok, app, version, protocolVersion, runtimeId}`; the CLI reuses a detached server only when its package, protocol, and Canvas-module fingerprint match, preventing an older same-version worktree from serving stale browser code
 - `GET /` — session list (ECC chrome)
 - `POST /api/sessions` `{file, reopen?}` — open/resume; `409 user-ended` unless `reopen`
 - `GET /canvas/<key>` — editor chrome; `GET /artifact/<key>/` — rendered artifact
@@ -115,6 +115,7 @@ sibling-asset access confined to the artifact directory; state dir is user-local
 never executes artifact content — it only serves it to the browser.
 
 The one optional outbound request is the pinned Mermaid library, fetched by the browser only
-for artifacts that contain a diagram; it renders with `securityLevel: 'strict'`, degrades to
-showing diagram source if unavailable, and can be repointed at a local mirror via
+after an artifact containing a diagram has loaded; it renders with `securityLevel: 'strict'`,
+cannot hold the Canvas page in a loading state, degrades to showing diagram source if
+unavailable, and can be repointed at a local mirror via
 `ECC_PLAN_CANVAS_MERMAID_URL`. The server itself still makes no network calls.
