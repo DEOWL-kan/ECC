@@ -176,7 +176,7 @@ async function main() {
         assert.strictEqual(result.parsed.status, 'open');
         assert.strictEqual(shutdownRequested, true, 'current CLI should retire the stale server');
         const health = JSON.parse((await request(legacyPort, 'GET', '/health')).body);
-        assert.strictEqual(health.protocolVersion, 2);
+        assert.strictEqual(health.protocolVersion, 3);
       } finally {
         if (legacyServer.listening) {
           await new Promise(resolve => legacyServer.close(resolve));

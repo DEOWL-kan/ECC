@@ -4,7 +4,7 @@
  * Plan Canvas loopback server.
  *
  * One detached process serves every open review session: the browser chrome,
- * the rendered artifact, an SSE stream for live updates, and the long-poll
+ * the rendered artifact, finite browser state polling, and the long-poll
  * endpoint agents block on. Sessions are keyed by canonical artifact path
  * (see sessions.js).
  */
@@ -35,9 +35,7 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_THINKING_STALE_MS = 90 * 1000;
 // An explicit typing signal expires faster: it means "a reply is seconds away".
 const DEFAULT_TYPING_EXPIRY_MS = 30 * 1000;
-// Presence is push-based, so expiring states need a tick to re-broadcast on.
-const DEFAULT_PRESENCE_SWEEP_MS = 5 * 1000;
-const PLAN_CANVAS_PROTOCOL_VERSION = 2;
+const PLAN_CANVAS_PROTOCOL_VERSION = 3;
 const TYPING_STATES = new Set(['thinking', 'typing', 'idle']);
 
 // Package versions do not distinguish two worktrees on the same release.
@@ -145,7 +143,6 @@ function createPlanCanvasServer({
   heartbeatMs = 15000,
   thinkingStaleMs = DEFAULT_THINKING_STALE_MS,
   typingExpiryMs = DEFAULT_TYPING_EXPIRY_MS,
-  presenceSweepMs = DEFAULT_PRESENCE_SWEEP_MS,
   onIdleShutdown = null,
   log = () => {}
 } = {}) {
@@ -154,17 +151,13 @@ function createPlanCanvasServer({
   const allowedHostnames = buildAllowedHostnames(host);
   const wake = new EventEmitter();
   wake.setMaxListeners(0);
-  const sseClients = new Map(); // key -> Set<res>
   const awaitCounts = new Map(); // key -> active long-poll count
   const workingKeys = new Map(); // key -> ms timestamp the agent took feedback
   const typingKeys = new Map(); // key -> ms timestamp the agent signalled composing
-  const watchers = new Map(); // key -> fs.FSWatcher
-  const lastPresence = new Map(); // key -> last broadcast state, for sweep diffing
   let idleTimer = null;
-  let presenceSweep = null;
   let closed = false;
 
-  // --- presence + SSE ---------------------------------------------------
+  // --- presence ---------------------------------------------------------
 
   /**
    * Presence never claims more than the server actually knows:
@@ -192,34 +185,6 @@ function createPlanCanvasServer({
     return session.pendingFeedback && session.pendingFeedback.length > 0 ? 'queued' : 'waiting';
   }
 
-  function broadcast(key, event, payload) {
-    const clients = sseClients.get(key);
-    if (!clients) return;
-    const frameText = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
-    for (const client of clients) client.write(frameText);
-  }
-
-  function broadcastPresence(key) {
-    const state = presenceFor(key);
-    lastPresence.set(key, state);
-    broadcast(key, 'presence', { state });
-  }
-
-  // Re-broadcast only where an expiry actually changed the answer, so an
-  // untouched canvas sees the thinking bubble clear itself.
-  function sweepPresence() {
-    for (const key of sseClients.keys()) {
-      const state = presenceFor(key);
-      if (lastPresence.get(key) !== state) broadcastPresence(key);
-    }
-  }
-
-  function startPresenceSweep() {
-    if (presenceSweep || !presenceSweepMs) return;
-    presenceSweep = setInterval(sweepPresence, presenceSweepMs);
-    if (presenceSweep.unref) presenceSweep.unref();
-  }
-
   // The agent is off working on this feedback batch; start the thinking clock.
   function markThinking(key) {
     workingKeys.set(key, Date.now());
@@ -234,7 +199,6 @@ function createPlanCanvasServer({
 
   function connectionCount() {
     let total = 0;
-    for (const clients of sseClients.values()) total += clients.size;
     for (const count of awaitCounts.values()) total += count;
     return total;
   }
@@ -260,31 +224,12 @@ function createPlanCanvasServer({
     armIdleTimer();
   }
 
-  // --- artifact watching --------------------------------------------------
-
-  function watchSession(session) {
-    if (watchers.has(session.key)) return;
-    const dir = path.dirname(session.file);
-    const base = path.basename(session.file);
-    let debounce = null;
+  function artifactVersionFor(session) {
     try {
-      const watcher = fs.watch(dir, (eventType, filename) => {
-        if (filename && filename !== base) return;
-        clearTimeout(debounce);
-        debounce = setTimeout(() => broadcast(session.key, 'reload', {}), 150);
-      });
-      watcher.on('error', () => watchers.delete(session.key));
-      watchers.set(session.key, watcher);
+      const stat = fs.statSync(session.file, { bigint: true });
+      return `${stat.mtimeNs}:${stat.size}`;
     } catch {
-      // Watching is best-effort; manual reload still works.
-    }
-  }
-
-  function unwatchSession(key) {
-    const watcher = watchers.get(key);
-    if (watcher) {
-      watcher.close();
-      watchers.delete(key);
+      return null;
     }
   }
 
@@ -295,9 +240,6 @@ function createPlanCanvasServer({
     if (!session) return null;
     clearAgentActivity(key);
     wake.emit(`wake:${key}`);
-    broadcast(key, 'ended', { endedBy: session.endedBy });
-    broadcastPresence(key);
-    unwatchSession(key);
     return session;
   }
 
@@ -322,8 +264,6 @@ function createPlanCanvasServer({
           next_step: 'The user ended this review from the browser. Do not reopen it unless they ask; pass reopen:true when they do.'
         });
       }
-      watchSession(session);
-      broadcastPresence(session.key);
       return sendJson(res, 200, {
         status: 'open',
         key: session.key,
@@ -350,7 +290,6 @@ function createPlanCanvasServer({
       const first = store.takeFeedback(key);
       if (first.status !== 'waiting') {
         if (first.status === 'feedback') markThinking(key);
-        broadcastPresence(key);
         return sendJson(res, 200, first);
       }
 
@@ -358,7 +297,6 @@ function createPlanCanvasServer({
       noteConnectionOpened();
       awaitCounts.set(key, (awaitCounts.get(key) || 0) + 1);
       clearAgentActivity(key);
-      broadcastPresence(key);
 
       let settled = false;
       let heartbeat = null;
@@ -371,7 +309,6 @@ function createPlanCanvasServer({
           if (payload.status === 'feedback') markThinking(key);
           res.end(JSON.stringify(payload));
         }
-        broadcastPresence(key);
         noteConnectionClosed();
       };
       const onWake = () => {
@@ -417,6 +354,23 @@ function createPlanCanvasServer({
       return sendJson(res, 200, { status: 'ended', endedBy: 'agent' });
     }
 
+    const stateMatch = pathname.match(/^\/api\/session\/([a-f0-9]{12})\/state$/);
+    if (stateMatch && req.method === 'GET') {
+      const session = store.get(stateMatch[1]);
+      if (!session) return sendJson(res, 404, { error: 'unknown session' });
+      // A visible Canvas used to keep the shared server alive through its SSE
+      // connection. Preserve that lifecycle with finite polling by restarting
+      // the idle clock whenever an active browser reports in.
+      armIdleTimer();
+      return sendJson(res, 200, {
+        status: session.status,
+        endedBy: session.endedBy || null,
+        chat: session.chat,
+        presence: presenceFor(session.key),
+        artifactVersion: artifactVersionFor(session)
+      });
+    }
+
     const sessionMatch = pathname.match(/^\/api\/session\/([a-f0-9]{12})\/(feedback|end|reply|typing)$/);
     if (sessionMatch && req.method === 'POST') {
       const [, key, action] = sessionMatch;
@@ -428,13 +382,10 @@ function createPlanCanvasServer({
         const result = store.queueFeedback(key, body.items, { endSession: Boolean(body.endSession) });
         if (!result) return sendJson(res, 409, { error: 'session already ended' });
         wake.emit(`wake:${key}`);
-        broadcast(key, 'chat-sync', { chat: store.get(key).chat });
-        if (body.endSession) broadcast(key, 'ended', { endedBy: 'user' });
         // A parked `await` takes the batch synchronously on the wake above, so
         // presence is already `thinking` by now; with nobody listening it
-        // reports `queued`. Either way the browser must be told, which the
-        // original handler never did, leaving a stale pill on screen.
-        broadcastPresence(key);
+        // reports `queued`. The browser sees the current answer on its next
+        // finite state poll.
         return sendJson(res, 200, {
           status: 'queued',
           accepted: result.accepted.length,
@@ -455,8 +406,6 @@ function createPlanCanvasServer({
         }
         const entry = store.addAgentReply(key, body.text);
         clearAgentActivity(key);
-        broadcast(key, 'chat-sync', { chat: store.get(key).chat });
-        broadcastPresence(key);
         return sendJson(res, 200, { status: 'sent', at: entry.at });
       }
 
@@ -471,7 +420,6 @@ function createPlanCanvasServer({
         if (state === 'idle') clearAgentActivity(key);
         else if (state === 'typing') typingKeys.set(key, Date.now());
         else markThinking(key);
-        broadcastPresence(key);
         return sendJson(res, 200, { status: 'ok', presence: presenceFor(key) });
       }
     }
@@ -482,32 +430,13 @@ function createPlanCanvasServer({
   function handleEvents(req, res, key) {
     const session = store.get(key);
     if (!session) return sendJson(res, 404, { error: 'unknown session' });
-    noteConnectionOpened();
-    res.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-store',
-      connection: 'keep-alive'
-    });
-    res.write(`event: chat-sync\ndata: ${JSON.stringify({ chat: session.chat })}\n\n`);
-    res.write(`event: presence\ndata: ${JSON.stringify({ state: presenceFor(key) })}\n\n`);
-    if (!sseClients.has(key)) sseClients.set(key, new Set());
-    sseClients.get(key).add(res);
-    lastPresence.set(key, presenceFor(key));
-    startPresenceSweep();
-    const ping = setInterval(() => res.write(': ping\n\n'), 25000);
-    if (ping.unref) ping.unref();
-    req.on('close', () => {
-      clearInterval(ping);
-      const clients = sseClients.get(key);
-      if (clients) {
-        clients.delete(res);
-        if (clients.size === 0) {
-          sseClients.delete(key);
-          lastPresence.delete(key);
-        }
-      }
-      noteConnectionClosed();
-    });
+    // Older Canvas clients opened one permanent EventSource per tab. Six open
+    // tabs exhausted Chromium's HTTP/1 connection pool for this origin, so
+    // the next top-level navigation waited forever without receiving a byte.
+    // HTTP 204 tells EventSource not to reconnect, releasing legacy tabs after
+    // a server upgrade. Current clients use finite state polling below.
+    res.writeHead(204, { 'cache-control': 'no-store', connection: 'close' });
+    res.end();
   }
 
   function serveArtifact(res, key, assetPath) {
@@ -626,14 +555,6 @@ function createPlanCanvasServer({
   function close() {
     closed = true;
     clearTimeout(idleTimer);
-    clearInterval(presenceSweep);
-    presenceSweep = null;
-    lastPresence.clear();
-    for (const key of watchers.keys()) unwatchSession(key);
-    for (const clients of sseClients.values()) {
-      for (const client of clients) client.end();
-    }
-    sseClients.clear();
     wake.emit('server-close');
     return new Promise((resolve, reject) => {
       server.close(error => (error ? reject(error) : resolve()));
@@ -652,7 +573,7 @@ function createPlanCanvasServer({
     });
   }
 
-  return { server, listen, close, presenceFor, sweepPresence, watchSession };
+  return { server, listen, close, presenceFor };
 }
 
 module.exports = {

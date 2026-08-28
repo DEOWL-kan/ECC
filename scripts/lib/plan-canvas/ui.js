@@ -209,6 +209,8 @@ function canvasClientJs() {
   let lastScroll = { x: 0, y: 0 };
   let ended = boot.status === 'ended';
   let sending = false;
+  let chatFingerprint = JSON.stringify(boot.chat || []);
+  let artifactVersion = null;
 
   try { queue = JSON.parse(sessionStorage.getItem(QKEY) || '[]'); } catch { queue = []; }
 
@@ -436,7 +438,7 @@ function canvasClientJs() {
   }
   if (ended) markEnded(boot.endedBy);
 
-  // --- server events ----------------------------------------------------
+  // --- server state -----------------------------------------------------
   const PRESENCE_LABELS = {
     waiting: 'agent not connected',
     listening: 'agent listening',
@@ -450,20 +452,44 @@ function canvasClientJs() {
     presence.querySelector('.label').textContent = PRESENCE_LABELS[state] || state;
     renderActivity(state);
   }
-  function connectEvents() {
-    const es = new EventSource('/events/' + key);
-    es.addEventListener('chat-sync', e => renderChat(JSON.parse(e.data).chat || []));
-    es.addEventListener('presence', e => applyPresence(JSON.parse(e.data).state));
-    es.addEventListener('reload', reloadArtifact);
-    es.addEventListener('ended', e => { markEnded(JSON.parse(e.data).endedBy); es.close(); });
-    es.onerror = () => {
-      if (ended) return;
-      renderActivity('offline');
-      presence.setAttribute('data-state', 'waiting');
-      presence.querySelector('.label').textContent = 'canvas server offline';
-    };
+  async function pollState() {
+    if (ended) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch('/api/session/' + key + '/state', {
+        cache: 'no-store',
+        signal: controller.signal
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const state = await res.json();
+      const nextChatFingerprint = JSON.stringify(state.chat || []);
+      if (nextChatFingerprint !== chatFingerprint) {
+        chatFingerprint = nextChatFingerprint;
+        renderChat(state.chat || []);
+      }
+      if (state.status === 'ended') {
+        markEnded(state.endedBy);
+        return;
+      }
+      applyPresence(state.presence);
+      if (artifactVersion === null) artifactVersion = state.artifactVersion;
+      else if (state.artifactVersion !== artifactVersion) {
+        artifactVersion = state.artifactVersion;
+        reloadArtifact();
+      }
+    } catch {
+      if (!ended) {
+        renderActivity('offline');
+        presence.setAttribute('data-state', 'waiting');
+        presence.querySelector('.label').textContent = 'canvas server offline';
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (!ended) setTimeout(pollState, 1000);
+    }
   }
-  connectEvents();
+  pollState();
 })();`;
 }
 

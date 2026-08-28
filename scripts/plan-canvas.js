@@ -390,10 +390,6 @@ async function cmdServer(args, { stateDir, port }) {
       startedAt: new Date().toISOString()
     }, null, 2)
   );
-  // Sessions restored from disk resume their file watchers.
-  for (const session of store.list()) {
-    if (session.status !== 'ended') canvas.watchSession(store.get(session.key));
-  }
   process.on('SIGINT', () => shutdown(0));
   process.on('SIGTERM', () => shutdown(0));
   process.stderr.write(`[plan-canvas] serving on http://${bound.host}:${bound.port}\n`);
