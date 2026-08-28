@@ -17,6 +17,7 @@ const path = require('path');
 
 const { buildAllowedHostnames, isAllowedHostHeader, isAllowedOrigin } = require('../loopback-guard');
 const { renderMarkdown } = require('./markdown');
+const { exportPdf } = require('./pdf');
 const { artifactSdkJs } = require('./sdk');
 const {
   canvasCss,
@@ -35,7 +36,7 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_THINKING_STALE_MS = 90 * 1000;
 // An explicit typing signal expires faster: it means "a reply is seconds away".
 const DEFAULT_TYPING_EXPIRY_MS = 30 * 1000;
-const PLAN_CANVAS_PROTOCOL_VERSION = 3;
+const PLAN_CANVAS_PROTOCOL_VERSION = 4;
 const TYPING_STATES = new Set(['thinking', 'typing', 'idle']);
 
 // Package versions do not distinguish two worktrees on the same release.
@@ -45,6 +46,7 @@ function computeRuntimeId() {
   const sources = [
     ['loopback-guard.js', path.join(__dirname, '..', 'loopback-guard.js')],
     ['markdown.js', path.join(__dirname, 'markdown.js')],
+    ['pdf.js', path.join(__dirname, 'pdf.js')],
     ['sdk.js', path.join(__dirname, 'sdk.js')],
     ['server.js', __filename],
     ['sessions.js', path.join(__dirname, 'sessions.js')],
@@ -135,6 +137,22 @@ function sendHtml(res, statusCode, html, { csp = true } = {}) {
   res.end(html);
 }
 
+function sendPdf(res, { buffer, filename }) {
+  const asciiName = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '-');
+  const encodedName = encodeURIComponent(filename).replace(/['()]/g, character =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+  res.writeHead(200, {
+    'content-type': 'application/pdf',
+    'content-length': buffer.length,
+    'content-disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`,
+    'x-content-type-options': 'nosniff',
+    'x-plan-canvas-filename': encodeURIComponent(filename),
+    'cache-control': 'no-store'
+  });
+  res.end(buffer);
+}
+
 function createPlanCanvasServer({
   store,
   host = DEFAULT_HOST,
@@ -143,6 +161,7 @@ function createPlanCanvasServer({
   heartbeatMs = 15000,
   thinkingStaleMs = DEFAULT_THINKING_STALE_MS,
   typingExpiryMs = DEFAULT_TYPING_EXPIRY_MS,
+  pdfExporter = exportPdf,
   onIdleShutdown = null,
   log = () => {}
 } = {}) {
@@ -369,6 +388,22 @@ function createPlanCanvasServer({
         presence: presenceFor(session.key),
         artifactVersion: artifactVersionFor(session)
       });
+    }
+
+    const pdfMatch = pathname.match(/^\/api\/session\/([a-f0-9]{12})\/pdf$/);
+    if (pdfMatch && req.method === 'GET') {
+      const session = store.get(pdfMatch[1]);
+      if (!session) return sendJson(res, 404, { error: 'unknown session' });
+      try {
+        const pdf = await pdfExporter({
+          url: `http://${req.headers.host}/artifact/${session.key}/?pdf=1`,
+          artifactFile: session.file
+        });
+        return sendPdf(res, pdf);
+      } catch (error) {
+        const statusCode = error.code === 'PDF_BROWSER_NOT_FOUND' ? 503 : 500;
+        return sendJson(res, statusCode, { error: error.message, code: error.code || 'PDF_EXPORT_FAILED' });
+      }
     }
 
     const sessionMatch = pathname.match(/^\/api\/session\/([a-f0-9]{12})\/(feedback|end|reply|typing)$/);

@@ -98,12 +98,17 @@ async function main() {
   fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'secret');
 
   const store = createSessionStore({ stateDir: path.join(tmp, 'state') });
+  const pdfRequests = [];
   let idleFired = false;
   const canvas = createPlanCanvasServer({
     store,
     version: '9.9.9-test',
     heartbeatMs: 25,
     idleTimeoutMs: 0,
+    pdfExporter: async options => {
+      pdfRequests.push(options);
+      return { buffer: Buffer.from('%PDF-1.4\n%%EOF\n'), filename: 'demo.pdf' };
+    },
     onIdleShutdown: () => {
       idleFired = true;
     }
@@ -119,7 +124,7 @@ async function main() {
       ok: true,
       app: 'ecc-plan-canvas',
       version: '9.9.9-test',
-      protocolVersion: 3,
+      protocolVersion: 4,
       runtimeId: PLAN_CANVAS_RUNTIME_ID
     });
   })) passed++; else failed++;
@@ -155,6 +160,7 @@ async function main() {
     assert.ok(res.body.includes('Plan Canvas'));
     assert.ok(res.body.includes('pc-session'));
     assert.ok(res.body.includes('Approve plan'));
+    assert.ok(res.body.includes('Download PDF'));
     assert.ok(res.body.includes('sandbox="allow-scripts allow-forms allow-popups"'));
   })) passed++; else failed++;
 
@@ -207,6 +213,22 @@ async function main() {
       const res = await request(port, 'GET', asset);
       assert.strictEqual(res.statusCode, 200, `${asset} should be 200`);
     }
+  })) passed++; else failed++;
+
+  if (await test('Download PDF fetches a generated PDF and starts a browser download', async () => {
+    const client = await request(port, 'GET', '/client.js');
+    assert.ok(client.body.includes("'/api/session/' + key + '/pdf'"));
+    assert.ok(client.body.includes('URL.createObjectURL'));
+
+    const res = await request(port, 'GET', `/api/session/${key}/pdf`);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.headers['content-type'], 'application/pdf');
+    assert.match(res.headers['content-disposition'], /^attachment;/);
+    assert.strictEqual(res.headers['x-plan-canvas-filename'], 'demo.pdf');
+    assert.ok(res.body.startsWith('%PDF-1.4'));
+    assert.strictEqual(pdfRequests.length, 1);
+    assert.strictEqual(pdfRequests[0].artifactFile, fs.realpathSync(artifact));
+    assert.strictEqual(pdfRequests[0].url, `http://127.0.0.1:${port}/artifact/${key}/?pdf=1`);
   })) passed++; else failed++;
 
   if (await test('browser client uses finite polling instead of one permanent connection per canvas', async () => {

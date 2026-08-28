@@ -42,6 +42,7 @@ A loopback-only web editor for plan artifacts (and any local HTML artifact):
 | Editor chrome | `scripts/lib/plan-canvas/ui.js` | `scripts/lib/control-pane/ui.js`, tokens from `scripts/dashboard-web.js` |
 | Markdown plan renderer | `scripts/lib/plan-canvas/markdown.js` | zero new deps; renders the `commands/plan.md` artifact schema (tables, tasks, code fences, Mermaid blocks) |
 | Mermaid diagrams | `scripts/lib/plan-canvas/ui.js` | ` ```mermaid ` blocks render in the browser after page load, themed to ECC; pinned CDN with non-blocking fallback (`ECC_PLAN_CANVAS_MERMAID_URL` for a local mirror) |
+| PDF export | `scripts/lib/plan-canvas/pdf.js` | local Chrome, Chromium, or Edge print renderer; returns a PDF download without a cloud converter or new npm runtime dependency (`ECC_PLAN_CANVAS_CHROME_PATH` override) |
 | Session state | `scripts/lib/plan-canvas/sessions.js` | file-path-keyed sessions, state under `~/.claude/plan-canvas/` (`ECC_PLAN_CANVAS_STATE_DIR` override) |
 | Skill | `skills/plan-canvas/SKILL.md` | skills-first surface; teaches the open → await → reply loop; defers visual guidance to `frontend-design-direction`, `artifact-design`, `dataviz` |
 | Command shim | `commands/plan-canvas.md` | legacy parity surface, points at the skill |
@@ -87,6 +88,10 @@ the poll is interrupted.
 - `GET /canvas/<key>` — editor chrome; `GET /artifact/<key>/` — rendered artifact
   (markdown → ECC plan template, HTML passthrough) with the annotation SDK injected;
   sibling assets confined to the artifact directory
+- `GET /api/session/<key>/state` — finite browser poll for chat, presence, end state,
+  and artifact revision; replaces one permanent browser connection per Canvas
+- `GET /api/session/<key>/pdf` — render the current loopback artifact with a private
+  temporary Chromium profile and return it as an attachment with a safe filename
 - `POST /api/session/<key>/feedback` `{items[], endSession?}` — browser queues
   chat / annotation / verdict items
 - `GET /api/await?file=<path>[&timeoutMs=n]` — agent long-poll (whitespace heartbeat);
@@ -94,8 +99,8 @@ the poll is interrupted.
 - `POST /api/session/<key>/reply` `{text}` — agent message → canvas chat
 - `POST /api/session/<key>/end` (user) / `POST /api/end` `{file}` (agent) — ender recorded;
   user ends are sticky: plain `open` refuses to reopen without `--reopen`
-- `GET /events/<key>` — SSE to the browser: `chat-sync`, `presence`
-  (waiting/listening/working), `reload` (artifact file changed), `ended`
+- `GET /events/<key>` — returns HTTP 204 so pre-protocol-3 EventSource clients stop
+  reconnecting and release their browser connection slots
 
 ## Deliberate differences from lavish-axi
 
@@ -104,7 +109,7 @@ the poll is interrupted.
 - ECC design tokens and chrome; JSON (not TOON) agent output.
 - Mermaid renders themed to ECC, but without lavish's pan/zoom or node-id capture —
   whole-element annotation covers pointing at a diagram or node.
-- No export/share hosting, no layout-audit gate, no bundled playbooks — ECC's existing
+- Local PDF export without share hosting, no layout-audit gate, no bundled playbooks — ECC's existing
   design skills (`frontend-design-direction`, `artifact-design`, `dataviz`) cover authoring.
 
 ## Security posture
@@ -119,3 +124,10 @@ after an artifact containing a diagram has loaded; it renders with `securityLeve
 cannot hold the Canvas page in a loading state, degrades to showing diagram source if
 unavailable, and can be repointed at a local mirror via
 `ECC_PLAN_CANVAS_MERMAID_URL`. The server itself still makes no network calls.
+
+PDF export also stays local. The server launches an installed Chrome, Chromium, or Edge
+executable with a new temporary profile, restricts the print target to the loopback Canvas
+origin, waits for a complete `%PDF` document, terminates that private renderer, and removes
+its temporary profile. Set `ECC_PLAN_CANVAS_CHROME_PATH` when auto-discovery cannot find the
+browser. The export endpoint returns an actionable error instead of uploading the plan or
+silently falling back to a remote service.

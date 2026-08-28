@@ -117,9 +117,19 @@ function canvasCss() {
   .toggle[aria-pressed="true"] .track{background:var(--accent);border-color:var(--accent-dim)}
   .toggle[aria-pressed="true"] .knob{transform:translateX(13px);background:#fff}
 
-  .icon-btn{height:28px;padding:0 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg3);color:var(--text2);cursor:pointer;font-size:11.5px;display:flex;align-items:center;gap:5px;transition:all .12s}
+  .icon-btn{height:28px;padding:0 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg3);color:var(--text2);cursor:pointer;font-size:11.5px;display:flex;align-items:center;gap:5px;white-space:nowrap;transition:all .12s}
   .icon-btn:hover{border-color:var(--border-light);color:var(--text);background:var(--bg4)}
+  .icon-btn:disabled{cursor:wait;opacity:.65}
   .icon-btn.danger:hover{border-color:var(--red);color:var(--red);background:var(--red-glow)}
+  .export-status{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10.5px;color:var(--text2)}
+  .export-status.error{color:var(--red)}
+  @media(max-width:900px){
+    .bar{gap:8px;padding:0 10px}
+    .brand .name,.presence,.toggle>span:first-child,.export-status{display:none}
+    .brand .file{max-width:90px}
+    #downloadPdfBtn{font-size:0}
+    #downloadPdfBtn:after{content:'PDF';font-size:11.5px}
+  }
 
   .layout{display:flex;height:calc(100% - 52px)}
   .frame{flex:1;min-width:0;position:relative;background:var(--bg2)}
@@ -204,6 +214,8 @@ function canvasClientJs() {
   const sendBtn = $('send');
   const statusEl = $('sendStatus');
   const presence = $('presence');
+  const downloadPdfBtn = $('downloadPdfBtn');
+  const exportStatus = $('exportStatus');
   const QKEY = 'ecc-plan-canvas:queue:' + key;
   let queue = [];
   let lastScroll = { x: 0, y: 0 };
@@ -415,6 +427,48 @@ function canvasClientJs() {
   $('changes').addEventListener('click', () => send([{ kind: 'verdict', verdict: 'request-changes' }]));
 
   // --- session controls ------------------------------------------------
+  let exportStatusTimer = null;
+  function reportExportStatus(message, isError) {
+    clearTimeout(exportStatusTimer);
+    exportStatus.textContent = message;
+    exportStatus.classList.toggle('error', Boolean(isError));
+    if (message && !isError) {
+      exportStatusTimer = setTimeout(() => { exportStatus.textContent = ''; }, 5000);
+    }
+  }
+  downloadPdfBtn.addEventListener('click', async () => {
+    if (downloadPdfBtn.disabled) return;
+    downloadPdfBtn.disabled = true;
+    downloadPdfBtn.textContent = 'Preparing PDF\u2026';
+    reportExportStatus('Rendering locally\u2026');
+    try {
+      const res = await fetch('/api/session/' + key + '/pdf', { cache: 'no-store' });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.error || ('HTTP ' + res.status));
+      }
+      const blob = await res.blob();
+      if (!blob.size || blob.type !== 'application/pdf') throw new Error('server returned an invalid PDF');
+      const encodedName = res.headers.get('x-plan-canvas-filename') || 'plan.pdf';
+      let filename = 'plan.pdf';
+      try { filename = decodeURIComponent(encodedName); } catch { /* safe fallback */ }
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = filename;
+      link.hidden = true;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+      reportExportStatus('Downloaded ' + filename);
+    } catch (error) {
+      reportExportStatus('PDF failed: ' + error.message, true);
+    } finally {
+      downloadPdfBtn.disabled = false;
+      downloadPdfBtn.textContent = 'Download PDF';
+    }
+  });
   $('reloadBtn').addEventListener('click', reloadArtifact);
   $('endBtn').addEventListener('click', async () => {
     if (!window.confirm('End this review session?')) return;
@@ -527,6 +581,8 @@ function renderCanvasHtml(session, { clientPath = '/client.js', cssPath = '/canv
     <span>Annotate</span><span class="track"><span class="knob"></span></span>
   </div>
   <button id="themeBtn" class="icon-btn" type="button">light</button>
+  <span id="exportStatus" class="export-status" role="status" aria-live="polite"></span>
+  <button id="downloadPdfBtn" class="icon-btn" type="button" aria-label="Download PDF" title="Download the current artifact as a PDF">Download PDF</button>
   <button id="reloadBtn" class="icon-btn" type="button" title="Reload artifact">Reload</button>
   <button id="endBtn" class="icon-btn danger" type="button">End session</button>
 </header>
@@ -600,6 +656,16 @@ ${TOKENS_CSS}
   pre.mermaid[data-processed]{background:transparent;border:none;padding:4px 0;text-align:center;overflow-x:auto}
   pre.mermaid[data-processed] svg{max-width:100%;height:auto}
   pre.mermaid.mermaid-unrendered:before{content:'diagram source (renderer unavailable)';display:block;font-family:var(--font);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:6px}
+  @page{margin:14mm}
+  @media print{
+    :root{--bg:#fff;--bg2:#fff;--bg3:#f4f5f7;--bg4:#eaecef;--surface:#fff;--surface-hover:#fff;--border:#d8dce5;--border-light:#c6cbd6;--text:#161922;--text2:#505667;--text3:#73798a;--accent:#3d5ab8;--accent-glow:rgba(61,90,184,.1);--pink:#b94076}
+    *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    body{background:#fff;color:var(--text);font-size:11pt}
+    .doc{max-width:none;padding:0}
+    h1,h2,h3,h4,h5,h6{break-after:avoid-page}
+    blockquote,pre,table,img,svg{break-inside:avoid-page}
+    [data-ecc-plan-canvas="ui"]{display:none!important}
+  }
 </style>
 </head>
 <body>
