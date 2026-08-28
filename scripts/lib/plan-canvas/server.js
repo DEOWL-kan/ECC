@@ -411,6 +411,14 @@ function createPlanCanvasServer({
     if (pdfMatch && (req.method === 'GET' || req.method === 'POST')) {
       const session = store.get(pdfMatch[1]);
       if (!session) return sendJson(res, 404, { error: 'unknown session' });
+      let requestedSnapshot = null;
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req, MAX_PDF_SNAPSHOT_BYTES);
+        if (typeof body.html !== 'string' || !body.html.trim()) {
+          return sendJson(res, 400, { error: 'html snapshot is required' });
+        }
+        requestedSnapshot = { key: session.key, html: body.html };
+      }
       if (pdfExportActive) {
         res.setHeader('retry-after', '1');
         return sendJson(res, 429, {
@@ -420,13 +428,7 @@ function createPlanCanvasServer({
       }
       pdfExportActive = true;
       try {
-        if (req.method === 'POST') {
-          const body = await readJsonBody(req, MAX_PDF_SNAPSHOT_BYTES);
-          if (typeof body.html !== 'string' || !body.html.trim()) {
-            return sendJson(res, 400, { error: 'html snapshot is required' });
-          }
-          pdfSnapshot = { key: session.key, html: body.html };
-        }
+        pdfSnapshot = requestedSnapshot;
         const pdf = await pdfExporter({
           url: `http://${req.headers.host}/artifact/${session.key}/?pdf=1`,
           artifactFile: session.file

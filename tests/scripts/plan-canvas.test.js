@@ -286,6 +286,27 @@ async function main() {
     assert.strictEqual((await first).statusCode, 200);
   })) passed++; else failed++;
 
+  if (await test('an incomplete PDF snapshot body does not consume renderer admission', async () => {
+    const stalled = http.request({
+      host: '127.0.0.1',
+      port,
+      method: 'POST',
+      path: `/api/session/${key}/pdf`,
+      agent: false,
+      headers: { 'content-type': 'application/json', 'content-length': 1024 }
+    });
+    stalled.on('error', () => {});
+    stalled.write('{"html":"partial');
+    try {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const competing = await request(port, 'GET', `/api/session/${key}/pdf`);
+      assert.strictEqual(competing.statusCode, 200);
+      assert.strictEqual(competing.headers['content-type'], 'application/pdf');
+    } finally {
+      stalled.destroy();
+    }
+  })) passed++; else failed++;
+
   if (await test('PDF failures log diagnostics without disclosing local paths', async () => {
     try {
       const rendererError = new Error('Chromium failed at /Users/private/browser-profile');

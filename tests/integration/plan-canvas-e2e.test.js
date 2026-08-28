@@ -159,6 +159,28 @@ async function main() {
       assert.strictEqual(maximumActive, 1);
     });
 
+    await test('port-scoped startup lock renews its lease while the owner is active', async () => {
+      const lockPort = port + 6;
+      const lockDir = path.join(tmp, 'startup-locks');
+      let releaseFirst;
+      let markFirstEntered;
+      let secondEntered = false;
+      const firstEntered = new Promise(resolve => { markFirstEntered = resolve; });
+      const first = withServerStartLock(lockPort, async () => {
+        markFirstEntered();
+        await new Promise(resolve => { releaseFirst = resolve; });
+      }, { lockDir, timeoutMs: 1000, leaseMs: 100 });
+      await firstEntered;
+      const second = withServerStartLock(lockPort, async () => {
+        secondEntered = true;
+      }, { lockDir, timeoutMs: 1000, leaseMs: 100 });
+      await new Promise(resolve => setTimeout(resolve, 250));
+      assert.strictEqual(secondEntered, false);
+      releaseFirst();
+      await Promise.all([first, second]);
+      assert.strictEqual(secondEntered, true);
+    });
+
     await test('port-scoped startup lock recovers dead tickets and failed owners', async () => {
       const lockPort = port + 3;
       const lockDir = path.join(tmp, 'startup-locks');
@@ -175,6 +197,26 @@ async function main() {
       );
       assert.ok(!fs.existsSync(deadTicket));
       assert.ok(!fs.readdirSync(lockDir).some(name => name.startsWith(`ecc-plan-canvas-${lockPort}-`)));
+    });
+
+    await test('port-scoped startup lock expires a stale ticket after PID reuse', async () => {
+      const lockPort = port + 5;
+      const lockDir = path.join(tmp, 'startup-locks');
+      fs.mkdirSync(lockDir, { recursive: true });
+      const reusedPidTicket = path.join(lockDir, `ecc-plan-canvas-${lockPort}-reused-pid.ticket`);
+      fs.writeFileSync(
+        reusedPidTicket,
+        JSON.stringify({ pid: process.pid, token: 'reused-pid', number: 1 })
+      );
+      assert.strictEqual(
+        await withServerStartLock(lockPort, async () => 'recovered', {
+          lockDir,
+          timeoutMs: 1000,
+          leaseMs: 100
+        }),
+        'recovered'
+      );
+      assert.ok(!fs.existsSync(reusedPidTicket));
     });
 
     await test('unrelated UDP traffic on the Canvas port does not block startup', async () => {
