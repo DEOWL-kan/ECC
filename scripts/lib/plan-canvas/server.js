@@ -411,6 +411,16 @@ function createPlanCanvasServer({
     if (pdfMatch && (req.method === 'GET' || req.method === 'POST')) {
       const session = store.get(pdfMatch[1]);
       if (!session) return sendJson(res, 404, { error: 'unknown session' });
+      const sendBusy = () => {
+        res.setHeader('retry-after', '1');
+        if (req.method === 'POST') res.setHeader('connection', 'close');
+        return sendJson(res, 429, {
+          error: 'another PDF export is already in progress',
+          code: 'PDF_EXPORT_BUSY'
+        });
+      };
+      // Reject overload before accepting a potentially slow snapshot body.
+      if (pdfExportActive) return sendBusy();
       let requestedSnapshot = null;
       if (req.method === 'POST') {
         const body = await readJsonBody(req, MAX_PDF_SNAPSHOT_BYTES);
@@ -419,13 +429,8 @@ function createPlanCanvasServer({
         }
         requestedSnapshot = { key: session.key, html: body.html };
       }
-      if (pdfExportActive) {
-        res.setHeader('retry-after', '1');
-        return sendJson(res, 429, {
-          error: 'another PDF export is already in progress',
-          code: 'PDF_EXPORT_BUSY'
-        });
-      }
+      // A renderer may have started while this request body was arriving.
+      if (pdfExportActive) return sendBusy();
       pdfExportActive = true;
       try {
         pdfSnapshot = requestedSnapshot;

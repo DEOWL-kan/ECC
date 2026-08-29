@@ -159,7 +159,7 @@ async function main() {
       assert.strictEqual(maximumActive, 1);
     });
 
-    await test('port-scoped startup lock renews its lease while the owner is active', async () => {
+    await test('port-scoped startup lock preserves an old ticket from the same live process', async () => {
       const lockPort = port + 6;
       const lockDir = path.join(tmp, 'startup-locks');
       let releaseFirst;
@@ -169,16 +169,25 @@ async function main() {
       const first = withServerStartLock(lockPort, async () => {
         markFirstEntered();
         await new Promise(resolve => { releaseFirst = resolve; });
-      }, { lockDir, timeoutMs: 1000, leaseMs: 100 });
+      }, { lockDir, timeoutMs: 1000 });
       await firstEntered;
-      const second = withServerStartLock(lockPort, async () => {
-        secondEntered = true;
-      }, { lockDir, timeoutMs: 1000, leaseMs: 100 });
-      await new Promise(resolve => setTimeout(resolve, 250));
-      assert.strictEqual(secondEntered, false);
-      releaseFirst();
-      await Promise.all([first, second]);
-      assert.strictEqual(secondEntered, true);
+      const ticketName = fs.readdirSync(lockDir).find(name => name.endsWith('.ticket'));
+      assert.ok(ticketName);
+      const old = new Date(Date.now() - 60 * 1000);
+      fs.utimesSync(path.join(lockDir, ticketName), old, old);
+      try {
+        await assert.rejects(
+          withServerStartLock(lockPort, async () => { secondEntered = true; }, {
+            lockDir,
+            timeoutMs: 200
+          }),
+          /timed out waiting for Plan Canvas startup lock/
+        );
+        assert.strictEqual(secondEntered, false);
+      } finally {
+        releaseFirst();
+        await first;
+      }
     });
 
     await test('port-scoped startup lock recovers dead tickets and failed owners', async () => {
@@ -199,20 +208,24 @@ async function main() {
       assert.ok(!fs.readdirSync(lockDir).some(name => name.startsWith(`ecc-plan-canvas-${lockPort}-`)));
     });
 
-    await test('port-scoped startup lock expires a stale ticket after PID reuse', async () => {
+    await test('port-scoped startup lock recovers a stale ticket after PID reuse', async () => {
       const lockPort = port + 5;
       const lockDir = path.join(tmp, 'startup-locks');
       fs.mkdirSync(lockDir, { recursive: true });
       const reusedPidTicket = path.join(lockDir, `ecc-plan-canvas-${lockPort}-reused-pid.ticket`);
       fs.writeFileSync(
         reusedPidTicket,
-        JSON.stringify({ pid: process.pid, token: 'reused-pid', number: 1 })
+        JSON.stringify({
+          pid: process.pid,
+          processIdentity: 'an-exited-process-instance',
+          token: 'reused-pid',
+          number: 1
+        })
       );
       assert.strictEqual(
         await withServerStartLock(lockPort, async () => 'recovered', {
           lockDir,
-          timeoutMs: 1000,
-          leaseMs: 100
+          timeoutMs: 1000
         }),
         'recovered'
       );

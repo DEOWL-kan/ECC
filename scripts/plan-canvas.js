@@ -21,7 +21,7 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const {
   canonicalizeArtifactPath,
@@ -39,7 +39,6 @@ const {
 } = require('./lib/plan-canvas/server');
 
 const VERSION = require('../package.json').version;
-const DEFAULT_START_LOCK_LEASE_MS = 5 * 1000;
 
 const SAFE_REQUEST_PATHS = new Set([
   '/',
@@ -183,6 +182,37 @@ function processIsAlive(pid) {
   }
 }
 
+function readProcessIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (process.platform === 'linux') {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const commandEnd = stat.lastIndexOf(')');
+      if (commandEnd === -1) return null;
+      const fieldsAfterCommand = stat.slice(commandEnd + 1).trim().split(/\s+/);
+      const startTicks = fieldsAfterCommand[19];
+      return startTicks ? `linux:${startTicks}` : null;
+    }
+    if (process.platform === 'win32') {
+      const command = `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`;
+      const startTicks = execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', command],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000, windowsHide: true }
+      ).trim();
+      return startTicks ? `win32:${startTicks}` : null;
+    }
+    const startedAt = execFileSync(
+      'ps',
+      ['-p', String(pid), '-o', 'lstart='],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 1000 }
+    ).trim();
+    return startedAt ? `${process.platform}:${startedAt}` : null;
+  } catch {
+    return null;
+  }
+}
+
 function readServerStartTicket(file) {
   let fd;
   try {
@@ -201,9 +231,10 @@ function readServerStartTicket(file) {
   }
 }
 
-function listServerStartTickets(lockDir, port, ownToken, staleAfterMs = DEFAULT_START_LOCK_LEASE_MS) {
+function listServerStartTickets(lockDir, port, ownToken, malformedStaleAfterMs = 60 * 1000) {
   const prefix = `ecc-plan-canvas-${validatePort(port)}-`;
   const entries = [];
+  const identities = new Map();
   for (const name of fs.readdirSync(lockDir)) {
     if (!name.startsWith(prefix) || (!name.endsWith('.choosing') && !name.endsWith('.ticket'))) continue;
     const file = path.join(lockDir, name);
@@ -215,18 +246,25 @@ function listServerStartTickets(lockDir, port, ownToken, staleAfterMs = DEFAULT_
       continue;
     }
     if (value.malformed) {
-      if (Date.now() - value.mtimeMs > staleAfterMs) {
+      if (Date.now() - value.mtimeMs > malformedStaleAfterMs) {
         try { fs.rmSync(file, { force: true }); } catch { /* already removed */ }
       }
       continue;
     }
-    const stale = value.token !== ownToken && (
-      !processIsAlive(value.pid) || Date.now() - value.mtimeMs > staleAfterMs
-    );
+    let stale = false;
+    if (value.token !== ownToken) {
+      if (!processIsAlive(value.pid)) {
+        stale = true;
+      } else if (typeof value.processIdentity === 'string') {
+        if (!identities.has(value.pid)) identities.set(value.pid, readProcessIdentity(value.pid));
+        const currentIdentity = identities.get(value.pid);
+        stale = currentIdentity !== null && currentIdentity !== value.processIdentity;
+      }
+    }
     if (stale) {
-      // A bounded, renewable lease prevents PID reuse from making an exited
-      // owner's ticket look live forever. Ticket names contain a never-reused
-      // owner token, so this cannot delete a later caller's ticket path.
+      // Process start identity distinguishes an exited owner from an unrelated
+      // process that later reused its PID. A live owner remains authoritative
+      // even if its event loop is paused for an arbitrary amount of time.
       try { fs.rmSync(file, { force: true }); } catch { /* already removed */ }
       continue;
     }
@@ -237,36 +275,36 @@ function listServerStartTickets(lockDir, port, ownToken, staleAfterMs = DEFAULT_
 
 async function withServerStartLock(port, task, {
   timeoutMs = 15 * 1000,
-  leaseMs = DEFAULT_START_LOCK_LEASE_MS,
   lockDir = path.join(os.homedir(), '.claude', 'plan-canvas', 'locks')
 } = {}) {
   const lockPort = validatePort(port);
+  const processIdentity = readProcessIdentity(process.pid);
+  if (!processIdentity) throw new Error('could not determine Plan Canvas startup lock process identity');
   const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const prefix = `ecc-plan-canvas-${lockPort}-${token}`;
   const choosingFile = path.join(lockDir, `${prefix}.choosing`);
   const ticketFile = path.join(lockDir, `${prefix}.ticket`);
   const startedAt = Date.now();
-  const lockLeaseMs = Number.isFinite(leaseMs) && leaseMs > 0
-    ? leaseMs
-    : DEFAULT_START_LOCK_LEASE_MS;
-  let leaseTimer = null;
   fs.mkdirSync(lockDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(choosingFile, JSON.stringify({ pid: process.pid, token }), { flag: 'wx', mode: 0o600 });
+  fs.writeFileSync(
+    choosingFile,
+    JSON.stringify({ pid: process.pid, processIdentity, token }),
+    { flag: 'wx', mode: 0o600 }
+  );
 
   try {
-    const existing = listServerStartTickets(lockDir, lockPort, token, lockLeaseMs)
+    const existing = listServerStartTickets(lockDir, lockPort, token)
       .filter(entry => !entry.choosing && Number.isInteger(entry.number));
     const number = existing.reduce((maximum, entry) => Math.max(maximum, entry.number), 0) + 1;
-    fs.writeFileSync(ticketFile, JSON.stringify({ pid: process.pid, token, number }), { flag: 'wx', mode: 0o600 });
+    fs.writeFileSync(
+      ticketFile,
+      JSON.stringify({ pid: process.pid, processIdentity, token, number }),
+      { flag: 'wx', mode: 0o600 }
+    );
     fs.rmSync(choosingFile, { force: true });
-    leaseTimer = setInterval(() => {
-      const now = new Date();
-      try { fs.utimesSync(ticketFile, now, now); } catch { /* cleanup or lease loss */ }
-    }, Math.max(25, Math.floor(lockLeaseMs / 3)));
-    if (leaseTimer.unref) leaseTimer.unref();
 
     while (true) {
-      const entries = listServerStartTickets(lockDir, lockPort, token, lockLeaseMs);
+      const entries = listServerStartTickets(lockDir, lockPort, token);
       const anotherOwnerIsChoosing = entries.some(entry => entry.choosing && entry.token !== token);
       const tickets = entries
         .filter(entry => !entry.choosing && Number.isInteger(entry.number))
@@ -279,7 +317,6 @@ async function withServerStartLock(port, task, {
     }
     return await task();
   } finally {
-    clearInterval(leaseTimer);
     fs.rmSync(choosingFile, { force: true });
     fs.rmSync(ticketFile, { force: true });
   }

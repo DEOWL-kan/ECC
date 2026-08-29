@@ -307,6 +307,44 @@ async function main() {
     }
   })) passed++; else failed++;
 
+  if (await test('an active PDF export rejects incomplete snapshot uploads before reading them', async () => {
+    holdPdfExport = true;
+    const first = request(port, 'GET', `/api/session/${key}/pdf`);
+    let stalled = null;
+    try {
+      await waitFor(() => typeof releasePdfExport === 'function');
+      const competing = new Promise((resolve, reject) => {
+        stalled = http.request({
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: `/api/session/${key}/pdf`,
+          agent: false,
+          headers: { 'content-type': 'application/json', 'content-length': 1024 }
+        }, res => {
+          let data = '';
+          res.on('data', chunk => { data += chunk; });
+          res.on('end', () => resolve({ statusCode: res.statusCode, body: data }));
+        });
+        stalled.on('error', reject);
+        stalled.write('{"html":"partial');
+      });
+      const timeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('incomplete PDF upload was not rejected')), 500);
+      });
+      const overloaded = await Promise.race([competing, timeout]);
+      assert.strictEqual(overloaded.statusCode, 429);
+      assert.strictEqual(jsonBody(overloaded).code, 'PDF_EXPORT_BUSY');
+    } finally {
+      if (stalled) stalled.destroy();
+      const release = releasePdfExport;
+      holdPdfExport = false;
+      releasePdfExport = null;
+      if (release) release();
+    }
+    assert.strictEqual((await first).statusCode, 200);
+  })) passed++; else failed++;
+
   if (await test('PDF failures log diagnostics without disclosing local paths', async () => {
     try {
       const rendererError = new Error('Chromium failed at /Users/private/browser-profile');
