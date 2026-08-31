@@ -141,8 +141,10 @@ The server exposes only:
 
 `ito_auth` validates existing credentials; it does not start device login. Use
 `ito_auth`, gather explicit buyer authority and every hard constraint, call
-`ito_find`, then poll with `ito_status` when needed. When a firm quote is ready
-and the buyer explicitly approves, call `ito_accept` with the ticket id.
+`ito_find`, then poll with `ito_status` when needed. When a quote is ready and
+the buyer explicitly approves, call `ito_accept` with the ticket id. Desk
+quotes are usually indicative and nonbinding until the desk confirms; the
+result carries `quote_class`.
 
 ## Rent or purchase semantics
 
