@@ -17,21 +17,28 @@ Use when: adopting Bun, migrating from Node, writing or debugging Bun scripts/te
 
 ## How It Works
 
-- **Runtime**: Drop-in Node-compatible runtime (built on JavaScriptCore, implemented in Zig).
-- **Package manager**: `bun install` is significantly faster than npm/yarn. Lockfile is `bun.lock` (text) by default in current Bun; older versions used `bun.lockb` (binary).
+- **Version baseline**: guidance below targets Bun 1.4.x. Check the actual version with `bun --version` before relying on flag names, since CLI flags have changed across major versions.
+- **Runtime**: Drop-in Node-compatible runtime, built on JavaScriptCore. As of Bun 1.4 the runtime itself is implemented in Rust (migrated from Zig). Not 100% Node-compatible — some native addons, less-common `node:` internal APIs, and packages that depend on Node-specific internals can still fail; verify before depending on it in production.
+- **Package manager**: `bun install` is typically faster than npm/yarn; actual gains depend on project size, network conditions, and cache state. Lockfile is `bun.lock` (text) by default in current Bun; older versions used `bun.lockb` (binary) — Bun still reads that format for migration, but new projects should use `bun.lock`.
 - **Bundler**: Built-in bundler and transpiler for apps and libraries.
-- **Test runner**: Built-in `bun test` with Jest-like API.
+- **Test runner**: Built-in `bun test` with a Jest-like API.
 
 **Migration from Node**: Replace `node script.js` with `bun run script.js` or `bun script.js`. Run `bun install` in place of `npm install`; most packages work. Use `bun run` for npm scripts; `bun x` for npx-style one-off runs. Node built-ins are supported; prefer Bun APIs where they exist for better performance.
 
+**Package and workspace commands**: `bun add <pkg>` / `bun remove <pkg>` / `bun update [pkg]` manage dependencies; `bun outdated` lists stale deps; `bun pm ls` shows the dependency tree derived from the lockfile (not a listing of what's actually on disk). Read-only inspection: `bun audit` reports known vulnerabilities. Modifying: `bun audit fix` applies fixes, `bun dedupe` collapses duplicate installs, and `bun prune` removes packages no longer referenced. Monorepos use a root `workspaces` array in `package.json` (same convention as npm/yarn); run a script in one workspace with `bun run --filter <pkg-name> <script>`.
+
+**Built-in APIs**: reach for these before adding a dependency — `Bun.file` / `Bun.write` for file I/O, `bun:sqlite` for an embedded SQLite database, `Bun.serve` for an HTTP/WebSocket server, [`Bun.sql`](https://bun.com/docs/runtime/sql) for SQL databases, [`Bun.redis`](https://bun.com/docs/runtime/redis) for Redis, and [`Bun.S3Client`](https://bun.com/docs/runtime/s3) for S3-compatible object storage. See the [1.4 release notes](https://bun.com/blog/bun-v1.4) for the rest of what's new.
+
 **Vercel**: Set runtime to Bun in project settings. Build: `bun run build` or `bun build ./src/index.ts --outdir=dist`. Install: `bun install --frozen-lockfile` for reproducible deploys.
+
+**Reference**: [Bun 1.4 release notes](https://bun.com/blog/bun-v1.4).
 
 ## Examples
 
 ### Run and install
 
 ```bash
-# Install dependencies (creates/updates bun.lock or bun.lockb)
+# Install dependencies (creates/updates bun.lock)
 bun install
 
 # Run a script or file
@@ -53,6 +60,8 @@ FOO=bar bun run script.ts
 bun test
 bun test --watch
 ```
+
+For CI, Bun 1.4's test runner adds: `bun test --changed[=<ref>]` (run test files affected by changes vs. a git commit/branch — includes tests exercising changed source files, not just edited test files), `bun test --isolate` (fresh global object per test file, so leaked handles in one file can't affect another; implied by `--parallel`), `bun test --parallel[=<n>]` (run test files across N worker processes, defaults to CPU core count), `bun test --shard=<n>/<count>` (split one suite across CI runners), and `bun test --timings=<file>` with `--update-timings` (merge per-file duration data across shards so `--shard`/`--parallel` can front-load the slowest files). Example: `bun test --parallel --timings=./test-timings.json --update-timings`. Run `bun test --help` locally to confirm exact flag behavior for your installed version.
 
 ```typescript
 // test/example.test.ts
@@ -79,6 +88,6 @@ Bun.serve({
 
 ## Best Practices
 
-- Commit the lockfile (`bun.lock` or `bun.lockb`) for reproducible installs.
+- Commit the lockfile (`bun.lock`) for reproducible installs.
 - Prefer `bun run` for scripts. For TypeScript, Bun runs `.ts` natively.
 - Keep dependencies up to date; Bun and the ecosystem evolve quickly.
