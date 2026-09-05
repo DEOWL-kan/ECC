@@ -325,13 +325,11 @@
     },
     {
       "command": "harness-audit",
-      "description": "Run a deterministic repository harness audit and return a prioritized scorecard. Use for a deterministic overall repo-readiness scorecard; for a security-specific audit use /security-scan.",
+      "description": "Run a deterministic repository harness audit and return a prioritized scorecard. Use for a deterministic overall repo-readiness scorecard; for a security-specific audit use the security-scan command.",
       "type": "testing",
       "primaryAgents": [],
       "allAgents": [],
-      "skills": [
-        "security-scan"
-      ],
+      "skills": [],
       "path": "commands/harness-audit.md"
     },
     {
@@ -1114,11 +1112,11 @@
         "count": 3
       },
       {
-        "skill": "security-scan",
-        "count": 3
+        "skill": "cpp-coding-standards",
+        "count": 2
       },
       {
-        "skill": "cpp-coding-standards",
+        "skill": "cpp-testing",
         "count": 2
       }
     ]
